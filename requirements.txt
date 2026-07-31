@@ -1,0 +1,23 @@
+# ── Telegram Bot ──
+python-telegram-bot>=20.0
+requests
+python-dotenv
+
+# ── FastAPI Admin Panel ──
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+
+# ── Authentication & Security ──
+python-jose[cryptography]>=3.3.0
+bcrypt>=4.0.0
+passlib[bcrypt]>=1.7.4
+
+# ── Database ──
+# SQLite is built into Python — no extra package needed
+
+# ── Optional: TOTP (2FA) — built-in via hmac/struct/base64 ──
+# No extra package required for the custom TOTP implementation
+
+# ── Optional: production WSGI server ──
+# gunicorn>=21.0.0

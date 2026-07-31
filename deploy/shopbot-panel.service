@@ -1,0 +1,15 @@
+[Unit]
+Description=Shop Bot Admin Panel (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/shopbot
+ExecStart=/opt/shopbot/venv/bin/python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/shopbot/.env
+
+[Install]
+WantedBy=multi-user.target
