@@ -101,7 +101,7 @@
 > **پیش‌نیاز:** سرور Ubuntu 20.04 / 22.04 / 24.04 با دسترسی root
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/Alirezahk15/shopbot/main/quick-install.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/Alirezahk15/shopbot/main/install.sh)
 ```
 
 این دستور به‌صورت خودکار:
