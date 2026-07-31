@@ -1,75 +1,147 @@
-# 🤖 ShopBot — ربات فروشگاه تلگرام
+<div align="center">
 
-پنل مدیریت حرفه‌ای + ربات تلگرام برای فروشگاه آنلاین
+<img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white"/>
+<img src="https://img.shields.io/badge/FastAPI-0.100+-009688?style=for-the-badge&logo=fastapi&logoColor=white"/>
+<img src="https://img.shields.io/badge/React-18-61DAFB?style=for-the-badge&logo=react&logoColor=black"/>
+<img src="https://img.shields.io/badge/Telegram-Bot-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white"/>
+
+<br/><br/>
+
+<img width="80" src="https://raw.githubusercontent.com/Alirezahk15/shopbot/main/.github/logo.png" alt="ShopBot"/>
+
+# 🤖 ShopBot
+
+### ربات فروشگاه تلگرام + پنل مدیریت وب حرفه‌ای
+
+*فروشگاه آنلاین تلگرامی کامل با پنل مدیریت React و نصب تک‌دستوری*
+
+<br/>
+
+[![نصب سریع](https://img.shields.io/badge/نصب_سریع-یک_دستور-6366f1?style=for-the-badge)](#-نصب-سریع)
+[![لایسنس](https://img.shields.io/badge/License-Commercial-f59e0b?style=for-the-badge)](#)
+[![پشتیبانی](https://img.shields.io/badge/Support-30_Days-10b981?style=for-the-badge)](#-پشتیبانی)
+
+</div>
 
 ---
 
 ## ✨ امکانات
 
-| بخش | ویژگی‌ها |
-|-----|---------|
-| 💳 پرداخت | کارت به کارت، USDT BEP20، USDT TRC20، TON، زرین‌پال |
-| 🛍 فروشگاه | محصولات، دسته‌بندی، موجودی، بنر |
-| 👑 VIP | سیستم سطح کاربر، تخفیف VIP، پیام سفارشی |
-| 🎟 تخفیف | کد تخفیف، تخفیف معرف |
-| 🛡 گارانتی | سیستم گارانتی با کد یکتا |
-| 📊 گزارش | داشبورد، فروش، پرداخت‌ها، کاربران |
-| 📢 پیام‌رسانی | پخش پیام به همه کاربران، فیلتر |
-| 🔒 امنیت | قفل گروه/کانال، کپچا، ضداسپم |
-| 🎨 پنل مدیریت | React + FastAPI، تم‌های رنگی، دو زبانه |
+<table>
+<tr>
+<td width="50%">
+
+### 💳 پرداخت
+- کارت به کارت (دستی / خودکار)
+- USDT BEP20 (شبکه BSC)
+- USDT TRC20 (شبکه TRON)
+- TON Blockchain
+- زرین‌پال (درگاه ایرانی)
+
+### 🛍 فروشگاه
+- محصولات + دسته‌بندی + موجودی
+- بنر سفارشی برای هر محصول
+- قیمت‌گذاری به دلار
+- سفارش‌گیری خودکار ۲۴/۷
+
+</td>
+<td width="50%">
+
+### 👑 مدیریت کاربران
+- سیستم سطح کاربر (برنز / نقره / طلا)
+- VIP با تخفیف خودکار
+- سیستم رفرال و درآمد معرف
+- مسدودسازی کاربر
+
+### 🎟 بازاریابی
+- کد تخفیف با محدودیت زمان/تعداد
+- پیام مناسبتی خودکار
+- پخش پیام به همه کاربران
+- دعوت‌نامه با بنر سفارشی
+
+</td>
+</tr>
+<tr>
+<td>
+
+### 🛡 گارانتی
+- کد گارانتی یکتا برای هر سفارش
+- پیگیری وضعیت گارانتی
+- پنل مدیریت گارانتی
+
+### 🔒 امنیت
+- احراز هویت دو مرحله‌ای (TOTP)
+- قفل گروه / کانال
+- کپچا ضدربات
+- محدودیت آنتی‌اسپم
+
+</td>
+<td>
+
+### 📊 پنل مدیریت
+- داشبورد با نمودار فروش
+- مدیریت کامل از طریق وب
+- ۲۰+ صفحه تخصصی
+- تم‌های رنگی + فونت + RTL/LTR
+- پشتیبانی از ادمین‌های متعدد
+
+### 📢 اطلاع‌رسانی
+- گزارش خودکار به گروه تلگرام
+- بکاپ خودکار دیتابیس
+- لاگ کامل رویدادها
+
+</td>
+</tr>
+</table>
 
 ---
 
-## 🚀 نصب روی سرور لینوکس
+## 🚀 نصب سریع
 
-### پیش‌نیازها
-- سرور Ubuntu 20.04 / 22.04 / 24.04
-- دسترسی root
-- دامنه یا IP ثابت
-- توکن ربات از [@BotFather](https://t.me/BotFather)
-
-### مراحل نصب
+> **پیش‌نیاز:** سرور Ubuntu 20.04 / 22.04 / 24.04 با دسترسی root
 
 ```bash
-# ۱. انتقال فایل‌ها به سرور
-scp -r shopbot/ root@SERVER_IP:/root/
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/Alirezahk15/shopbot/main/quick-install.sh)
+```
 
-# ۲. وارد شدن به سرور
-ssh root@SERVER_IP
+این دستور به‌صورت خودکار:
+1. پروژه را دانلود می‌کند
+2. یک **Wizard نصب تحت وب** روی پورت `8080` راه‌اندازی می‌کند
+3. آدرس را نمایش می‌دهد
 
-# ۳. رفتن به پوشه پروژه
-cd /root/shopbot
+سپس آدرس نمایش‌داده‌شده را در مرورگر باز کنید و نصب را تکمیل کنید.
 
-# ۴. اجرای نصب‌کننده
+---
+
+## 🧙 Wizard نصب تحت وب
+
+بعد از اجرای دستور بالا، wizard در مرورگر باز کنید و مراحل را طی کنید:
+
+| مرحله | توضیح |
+|-------|-------|
+| 1 — خوش‌آمدید | معرفی امکانات |
+| 2 — توکن ربات | اعتبارسنجی زنده با تلگرام |
+| 3 — ادمین | آیدی عددی تلگرام |
+| 4 — پنل | دامنه + رمز + SSL رایگان |
+| 5 — پرداخت | انتخاب روش‌های فعال |
+| 6 — کلیدهای API | BscScan، زرین‌پال و... |
+| 7 — مرور | تأیید نهایی |
+| 8 — نصب | لاگ زنده + progress bar |
+| 9 — پایان | لینک پنل + رمز ورود |
+
+---
+
+## 🔧 نصب دستی
+
+اگر ترجیح می‌دهید بدون wizard نصب کنید:
+
+```bash
+# ۱. clone پروژه
+git clone https://github.com/Alirezahk15/shopbot.git /opt/shopbot
+cd /opt/shopbot
+
+# ۲. اجرای اسکریپت نصب سنتی
 sudo bash install.sh
-```
-
-اسکریپت به‌صورت خودکار:
-- Python 3، Node.js 20، Nginx نصب می‌کند
-- از شما توکن ربات و تنظیمات می‌پرسد
-- پنل React را Build می‌کند
-- سرویس‌های systemd می‌سازد
-- Nginx را پیکربندی می‌کند
-- فایروال را تنظیم می‌کند
-
----
-
-## 🔄 آپدیت
-
-```bash
-# کپی فایل‌های جدید به سرور
-scp -r shopbot/ root@SERVER_IP:/root/shopbot-new/
-
-# اجرای آپدیت
-ssh root@SERVER_IP "cd /root/shopbot-new && sudo bash update.sh"
-```
-
----
-
-## 🗑 حذف
-
-```bash
-sudo bash /opt/shopbot/uninstall.sh
 ```
 
 ---
@@ -78,32 +150,46 @@ sudo bash /opt/shopbot/uninstall.sh
 
 ```
 shopbot/
-├── main.py              ← ربات تلگرام
+├── main.py              ← ربات تلگرام (Python)
 ├── database.py          ← لایه دیتابیس SQLite
-├── config.py            ← تنظیمات ثابت
-├── lang.py              ← ترجمه فارسی/انگلیسی
+├── config.py            ← تنظیمات پروژه
+├── lang.py              ← ترجمه فارسی / انگلیسی
 ├── api/
-│   ├── main.py          ← FastAPI (پنل مدیریت)
-│   ├── auth.py          ← احراز هویت JWT + TOTP
-│   └── routers/         ← روترهای API (22 فایل)
+│   ├── main.py          ← FastAPI — پنل مدیریت
+│   ├── auth.py          ← JWT + bcrypt + TOTP
+│   └── routers/         ← 22 روتر تخصصی
 ├── panel/
-│   └── src/             ← React frontend
-├── install.sh           ← نصب خودکار
-├── update.sh            ← آپدیت
-└── uninstall.sh         ← حذف
+│   └── src/             ← React 18 + Vite + Tailwind
+├── setup/
+│   └── wizard.py        ← Wizard نصب تحت وب
+├── quick-install.sh     ← نصب تک‌دستوری
+├── install.sh           ← راه‌اندازی wizard
+├── update.sh            ← آپدیت پروژه
+└── uninstall.sh         ← حذف کامل
 ```
 
 ---
 
-## ⚙️ تنظیمات پس از نصب
+## 🛠 تکنولوژی‌ها
 
-### ورود به پنل
-```
-آدرس:   https://your-domain.com
-رمز:    (در پایان نصب نمایش داده می‌شود)
-```
+<div align="center">
 
-### دستورات مدیریت سرور
+| بخش | تکنولوژی |
+|-----|----------|
+| ربات | Python 3.10+ · python-telegram-bot v20 |
+| API | FastAPI · uvicorn · Pydantic v2 |
+| دیتابیس | SQLite (WAL mode) |
+| پنل | React 18 · Vite · TailwindCSS |
+| احراز هویت | JWT · bcrypt · TOTP (2FA) |
+| وب‌سرور | Nginx · systemd |
+| نصب | Python http.server (بدون dependency) |
+
+</div>
+
+---
+
+## ⚙️ دستورات مدیریت سرور
+
 ```bash
 # وضعیت سرویس‌ها
 systemctl status shopbot shopbot-panel
@@ -114,22 +200,35 @@ journalctl -u shopbot -f
 # لاگ زنده پنل
 journalctl -u shopbot-panel -f
 
-# ری‌استارت همه
+# ری‌استارت
 systemctl restart shopbot shopbot-panel
+
+# آپدیت به آخرین نسخه
+cd /opt/shopbot && sudo bash update.sh
 ```
 
 ---
 
-## 🛠 تکنولوژی‌ها
+## 📸 پیش‌نمایش
 
-- **Backend:** Python 3.10+, python-telegram-bot v20, FastAPI
-- **Database:** SQLite (WAL mode)
-- **Frontend:** React 18, Vite, TailwindCSS
-- **Server:** Nginx, uvicorn, systemd
-- **Auth:** JWT, bcrypt, TOTP (2FA)
+> پنل مدیریت با طراحی دارک مینیمال، دو زبانه (فارسی/انگلیسی) و تم‌های رنگی متنوع.
+
+| داشبورد | محصولات | تنظیمات |
+|---------|---------|---------|
+| ![dashboard](https://via.placeholder.com/280x160/141720/6366f1?text=Dashboard) | ![products](https://via.placeholder.com/280x160/141720/10b981?text=Products) | ![settings](https://via.placeholder.com/280x160/141720/f59e0b?text=Settings) |
 
 ---
 
 ## 📞 پشتیبانی
 
-پس از خرید، ۳۰ روز پشتیبانی رایگان ارائه می‌شود.
+- ✅ **۳۰ روز** پشتیبانی رایگان پس از خرید
+- 📱 تلگرام: [@Alirezahk15](https://t.me/Alirezahk15)
+- 🐛 گزارش باگ: [GitHub Issues](https://github.com/Alirezahk15/shopbot/issues)
+
+---
+
+<div align="center">
+
+ساخته‌شده با ❤️ برای فروشندگان ایرانی
+
+</div>
