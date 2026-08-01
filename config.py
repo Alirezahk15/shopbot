@@ -4,21 +4,49 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 def _require_env(name):
-    """خواندن متغیر محیطی با پیام خطای واضح به‌جای KeyError گنگ"""
+    """Read a REQUIRED environment variable, or exit with a clear message.
+    English on purpose: journalctl and most terminals cannot render Persian."""
     val = os.environ.get(name)
     if not val:
         import sys
         sys.exit(
-            "\n[ShopBot] متغیر محیطی %s پیدا نشد!\n" % name +
-            "فایل .env کنار config.py وجود ندارد یا ناقص است.\n"
-            "از فایل .env.example یک کپی با نام .env بسازید و مقادیر را پر کنید.\n"
+            "\n[ShopBot] Required environment variable %s is missing!\n" % name
+            + "The .env file next to config.py is missing or incomplete.\n"
+            + "How to fix:\n"
+            + "  cd /opt/shopbot && cp .env.example .env && nano .env\n"
+            + "  sudo systemctl restart shopbot\n"
         )
     return val
 
-# ---- Secrets (loaded from .env — never hardcode these) ----
+
+def _optional_env(name, default=""):
+    """Read an OPTIONAL environment variable.
+    These are only needed when the matching payment method is enabled, so an
+    empty value must never stop the bot from booting."""
+    return os.environ.get(name) or default
+
+
+def require_bscscan_key():
+    """Called at the moment a BEP20 transaction is verified, so a missing key
+    fails loudly there instead of preventing the whole bot from starting."""
+    if not BSCSCAN_API_KEY:
+        raise RuntimeError(
+            "BSCSCAN_API_KEY is not set in .env, so USDT BEP20 payments cannot "
+            "be verified. Add the key to /opt/shopbot/.env and restart the bot."
+        )
+    return BSCSCAN_API_KEY
+
+
+# ---- Secrets (loaded from .env - never hardcode these) ----
+# Only BOT_TOKEN is genuinely required for the bot to start.
 BOT_TOKEN = _require_env("BOT_TOKEN")
-BSCSCAN_API_KEY = _require_env("BSCSCAN_API_KEY")
-_USD_RATE_API_KEY = _require_env("USD_RATE_API_KEY")
+
+# Optional - only used when USDT BEP20 payment is enabled.
+BSCSCAN_API_KEY = _optional_env("BSCSCAN_API_KEY")
+# Optional - navasan.tech accepts the public "free" key.
+_USD_RATE_API_KEY = _optional_env("USD_RATE_API_KEY", "free")
+# Optional - only used when Zarinpal payment is enabled.
+ZARINPAL_MERCHANT_ID = _optional_env("ZARINPAL_MERCHANT_ID")
 
 ADMIN_IDS = [1663320676]
 SUPPORT_USERNAME = "@akhit77"

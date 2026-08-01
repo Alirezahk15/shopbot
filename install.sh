@@ -143,7 +143,7 @@ apt_lock_help() {
 # ---------------------------------------------------------------------------
 # Prerequisites: git + python3 + curl
 # ---------------------------------------------------------------------------
-step "Step 1/3  Checking prerequisites"
+step "Step 1/4  Checking prerequisites"
 
 MISSING=""
 for bin in python3 git curl; do
@@ -186,7 +186,7 @@ ok "Python ${PY_VER} detected"
 # ---------------------------------------------------------------------------
 # Locate wizard.py (local source tree, otherwise clone)
 # ---------------------------------------------------------------------------
-step "Step 2/3  Locating ShopBot source"
+step "Step 2/4  Locating ShopBot source"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 WIZARD=""
@@ -244,7 +244,72 @@ ok "Wizard script verified"
 # ---------------------------------------------------------------------------
 # Port availability
 # ---------------------------------------------------------------------------
-step "Step 3/3  Starting the setup wizard"
+# ---------------------------------------------------------------------------
+# Build the React setup wizard (same stack as the admin panel).
+# This is best-effort: if Node.js or the build fails for any reason, the
+# wizard still starts using its built-in HTML interface.
+# ---------------------------------------------------------------------------
+step "Step 3/4  Building the wizard interface"
+
+SRC_ROOT="$(cd "$(dirname "$WIZARD")/.." 2>/dev/null && pwd)" || SRC_ROOT=""
+UI_DIR="${SRC_ROOT}/setup/ui"
+UI_BUILT=0
+
+if [ -f "${UI_DIR}/dist/index.html" ]; then
+    UI_BUILT=1
+    ok "Wizard interface already built - skipping"
+elif [ ! -f "${UI_DIR}/package.json" ]; then
+    warn "Wizard UI source not found - using the built-in interface"
+else
+    NODE_MAJOR=0
+    if command -v node >/dev/null 2>&1; then
+        NODE_MAJOR="$(node -v 2>/dev/null | sed "s/^v//" | cut -d. -f1)"
+        case "$NODE_MAJOR" in (*[!0-9]*|"") NODE_MAJOR=0 ;; esac
+    fi
+
+    if [ "$NODE_MAJOR" -lt 18 ]; then
+        info "Installing Node.js 20 (needed to build the wizard interface)"
+        wait_for_apt || true
+        if curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesource.sh >>"$LOG_FILE" 2>&1 \
+            && bash /tmp/nodesource.sh >>"$LOG_FILE" 2>&1 \
+            && wait_for_apt \
+            && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs >>"$LOG_FILE" 2>&1; then
+            NODE_MAJOR="$(node -v 2>/dev/null | sed "s/^v//" | cut -d. -f1)"
+            case "$NODE_MAJOR" in (*[!0-9]*|"") NODE_MAJOR=0 ;; esac
+            ok "Node.js $(node -v 2>/dev/null) installed"
+        else
+            warn "Could not install Node.js now - the wizard will use its built-in interface"
+            warn "The installer will install Node.js again later for the admin panel"
+        fi
+    else
+        ok "Node.js $(node -v 2>/dev/null) detected"
+    fi
+
+    if [ "$NODE_MAJOR" -ge 18 ]; then
+        info "Building the wizard interface (about 1-2 minutes)..."
+        if ( cd "$UI_DIR" \
+             && npm install --no-audit --no-fund --loglevel=error >>"$LOG_FILE" 2>&1 \
+             && npm run build >>"$LOG_FILE" 2>&1 ); then
+            if [ -f "${UI_DIR}/dist/index.html" ]; then
+                UI_BUILT=1
+                ok "Wizard interface built successfully"
+            else
+                warn "Build finished but no output was produced - using the built-in interface"
+            fi
+        else
+            warn "Wizard interface build failed - using the built-in interface instead"
+            warn "Details are in ${LOG_FILE} (this does not stop the installation)"
+        fi
+    fi
+fi
+
+if [ "$UI_BUILT" -eq 1 ]; then
+    info "Interface: React (same design as the admin panel)"
+else
+    info "Interface: built-in HTML wizard (fully functional)"
+fi
+
+step "Step 4/4  Starting the setup wizard"
 
 if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":${PORT} "; then
     HOLDER="$(ss -ltnp 2>/dev/null | grep ":${PORT} " | head -n 1 | sed 's/.*users:((//' | cut -d, -f1 | tr -d '\"')"

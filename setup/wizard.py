@@ -77,6 +77,35 @@ _state = {
 }
 _lock = threading.Lock()
 
+# Built React wizard UI (setup/ui/dist). install.sh builds it with Node.
+# When the build is missing or failed, we fall back to WIZARD_HTML so the
+# installer can never be left without a usable interface.
+UI_DIST = Path(__file__).resolve().parent / "ui" / "dist"
+
+_MIME = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".mjs": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".json": "application/json; charset=utf-8",
+    ".map": "application/json; charset=utf-8",
+}
+
+
+def react_ui_available():
+    try:
+        return (UI_DIST / "index.html").is_file()
+    except OSError:
+        return False
+
+
 
 def _log(msg):
     line = str(msg)
@@ -417,29 +446,38 @@ def step_files(cfg):
     _log("Project files copied.")
 
 
+def _env_line(key, value):
+    """Write a .env entry with a quoted value.
+    Unquoted values break on spaces and on ' #', which silently truncates
+    passwords and tokens and then looks like a wrong password at login."""
+    v = str(value if value is not None else "")
+    v = v.replace(chr(92), chr(92) * 2).replace(chr(34), chr(92) + chr(34))
+    return key + "=" + chr(34) + v + chr(34)
+
+
 def step_env(cfg):
     domain = cfg.get("domain", "localhost")
     env_file = INSTALL_DIR / ".env"
     jwt = secrets.token_hex(32)
     if env_file.exists():
-        m = re.search(r"^JWT_SECRET=(.+)$", env_file.read_text(), re.M)
+        m = re.search(r'^JWT_SECRET="?([^"]+)"?$', env_file.read_text(), re.M)
         if m and len(m.group(1).strip()) >= 32:
             jwt = m.group(1).strip()
             _log("Reusing the existing JWT secret so logged-in sessions survive.")
     lines = [
         "# Telegram Bot",
-        "BOT_TOKEN=" + str(cfg.get("bot_token", "")),
+        _env_line("BOT_TOKEN", cfg.get("bot_token", "")),
         "",
         "# Admin Panel",
-        "PANEL_PASSWORD=" + str(cfg.get("panel_password", "")),
-        "JWT_SECRET=" + jwt,
+        _env_line("PANEL_PASSWORD", cfg.get("panel_password", "")),
+        _env_line("JWT_SECRET", jwt),
         "PANEL_PORT=8000",
         "PANEL_CORS_ORIGINS=https://" + domain + ",http://" + domain,
         "",
         "# Payment APIs (optional)",
-        "BSCSCAN_API_KEY=" + str(cfg.get("bscscan_key", "")),
-        "USD_RATE_API_KEY=" + str(cfg.get("navasan_key", "")),
-        "ZARINPAL_MERCHANT_ID=" + str(cfg.get("zarinpal_id", "")),
+        _env_line("BSCSCAN_API_KEY", cfg.get("bscscan_key", "")),
+        _env_line("USD_RATE_API_KEY", cfg.get("navasan_key", "")),
+        _env_line("ZARINPAL_MERCHANT_ID", cfg.get("zarinpal_id", "")),
     ]
     env_file.write_text("\n".join(lines) + "\n")
     os.chmod(env_file, 0o600)
@@ -955,11 +993,46 @@ class WizardHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_static(self, rel):
+        """Serve a file from the built React bundle. Returns True if handled."""
+        if not react_ui_available():
+            return False
+        rel = rel.lstrip("/")
+        if not rel:
+            rel = "index.html"
+        try:
+            target = (UI_DIST / rel).resolve()
+            root = UI_DIST.resolve()
+        except OSError:
+            return False
+        # Block path traversal: never serve outside the dist folder.
+        if root != target and root not in target.parents:
+            return False
+        if not target.is_file():
+            return False
+        try:
+            body = target.read_bytes()
+        except OSError:
+            return False
+        ctype = _MIME.get(target.suffix.lower(), "application/octet-stream")
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        if "/assets/" in "/" + rel:
+            self.send_header("Cache-Control", "public, max-age=86400")
+        else:
+            self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+        return True
+
     def do_GET(self):
         path = urlparse(self.path).path
 
-        if path == "/":
-            self._html(WIZARD_HTML)
+        if path == "/" or path == "/index.html":
+            # Prefer the React build; fall back to the embedded HTML wizard.
+            if not self._serve_static("index.html"):
+                self._html(WIZARD_HTML)
 
         elif path == "/api/state":
             with _lock:
@@ -1006,6 +1079,9 @@ class WizardHandler(http.server.BaseHTTPRequestHandler):
                     time.sleep(0.4)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+
+        elif not path.startswith("/api/") and self._serve_static(path):
+            pass
 
         else:
             self.send_error(404)

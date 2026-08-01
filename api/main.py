@@ -333,8 +333,11 @@ def forgot_password(body: ForgotRequest, request: Request):
         raise HTTPException(status_code=429, detail="Too many attempts. Try again in a few minutes.")
     auth_module.record_attempt(f"forgot:{ip}")
     row = auth_module.get_admin_row(body.user_id)
-    # Always answer the same way so admin IDs can't be probed
-    if row is None or not row["panel_username"]:
+    # Always answer the same way so admin IDs can't be probed.
+    # A panel_username is deliberately NOT required here: on a fresh install the
+    # bot creates admin rows with no panel credentials, and those owners must
+    # still be able to recover access or the panel is locked forever.
+    if row is None:
         return _GENERIC_FORGOT
     code = f"{_secrets.randbelow(1000000):06d}"
     code_hash = _hashlib.sha256(code.encode()).hexdigest()
@@ -381,12 +384,23 @@ def reset_password(body: ResetPasswordRequest, request: Request):
     if len(body.new_password) < 6:
         raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
     with db.get_db() as conn:
+        # Give the admin a login name if they do not have one yet, otherwise the
+        # new password would be unusable (login looks admins up by username).
+        current = row["panel_username"] if row is not None else None
+        username = (current or "").strip()
+        if not username:
+            taken = conn.execute(
+                "SELECT 1 FROM admins WHERE lower(panel_username)='admin' "
+                "AND user_id<>?", (body.user_id,)
+            ).fetchone()
+            username = "admin" if not taken else "admin%d" % body.user_id
         conn.execute(
-            "UPDATE admins SET panel_password_hash=?, reset_code_hash='', reset_code_expires='' WHERE user_id=?",
-            (auth_module.hash_password(body.new_password), body.user_id),
+            "UPDATE admins SET panel_username=?, panel_password_hash=?, "
+            "reset_code_hash='', reset_code_expires='' WHERE user_id=?",
+            (username, auth_module.hash_password(body.new_password), body.user_id),
         )
     auth_module.clear_attempts(rate_key)
-    return {"success": True}
+    return {"success": True, "username": username}
 
 
 # ── Section permission enforcement (based on admin permissions) ──

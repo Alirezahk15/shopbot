@@ -410,7 +410,7 @@ def verify_usdt_bep20(tx_hash: str):
         wallet = get_usdt_wallet()
 
         def rpc(action, **params):
-            p = {"module": "proxy", "action": action, "apikey": BSCSCAN_API_KEY, **params}
+            p = {"module": "proxy", "action": action, "apikey": require_bscscan_key(), **params}
             return requests.get(BSCSCAN_API, params=p, timeout=15).json().get("result")
 
         tx = rpc("eth_getTransactionByHash", txhash=tx_hash)
