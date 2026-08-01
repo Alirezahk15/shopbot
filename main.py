@@ -1,4 +1,4 @@
-import time, logging, asyncio, requests, functools, json, random, os
+import time, logging, asyncio, requests, json, random, os
 from datetime import datetime, timezone
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
                       ReplyKeyboardMarkup, KeyboardButton, LabeledPrice)

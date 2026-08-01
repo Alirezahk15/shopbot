@@ -1,4 +1,20 @@
 @echo off
+cd /d %~dp0
+
+if not exist .env (
+    echo ============================================
+    echo   [ERROR] .env file not found!
+    echo ============================================
+    echo.
+    echo   Please copy .env.example to .env and fill in
+    echo   your values ^(BOT_TOKEN, PANEL_PASSWORD, ...^)
+    echo.
+    echo   Command:  copy .env.example .env
+    echo.
+    pause
+    exit /b 1
+)
+
 echo ============================================
 echo   Starting Shop Bot + Web Panel
 echo ============================================
@@ -16,8 +32,7 @@ start "Web API (port 8000)" cmd /k "uvicorn api.main:app --host 0.0.0.0 --port 8
 REM Wait a moment
 timeout /t 2 /nobreak >nul
 
-REM Start React dev server in a new window (for development)
-REM Comment this out in production (use the built panel served by FastAPI instead)
+REM Start React dev server (development only)
 start "Web Panel Dev (port 3000)" cmd /k "cd panel && npm run dev"
 
 echo.
@@ -28,5 +43,4 @@ echo   Web API:       http://localhost:8000
 echo   Web Panel:     http://localhost:3000
 echo   API Docs:      http://localhost:8000/docs
 echo.
-echo Press any key to close this window (services will keep running)
 pause >nul

@@ -104,6 +104,20 @@
 sudo bash <(curl -fsSL https://raw.githubusercontent.com/Alirezahk15/shopbot/main/install.sh)
 ```
 
+> **🔒 اگر ریپو Private است (خطای `404`):** دستور بالا فقط برای ریپوی Public کار می‌کند. دو راه‌حل:
+>
+> **۱)** ریپو را موقتاً Public کنید (Settings → Danger Zone → Change visibility) و بعد از نصب دوباره Private کنید.
+>
+> **۲)** با Personal Access Token نصب کنید (ریپو Private می‌ماند):
+>
+> ```bash
+> export GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+> sudo -E bash <(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+>   https://raw.githubusercontent.com/Alirezahk15/shopbot/main/install.sh)
+> ```
+>
+> اسکریپت `install.sh` به‌صورت خودکار از همین توکن برای دانلود پروژه استفاده می‌کند.
+
 این دستور به‌صورت خودکار:
 1. پروژه را دانلود می‌کند
 2. یک **Wizard نصب تحت وب** روی پورت `8080` راه‌اندازی می‌کند

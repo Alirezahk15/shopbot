@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import database as db
 
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "change-me-set-JWT_SECRET-in-env")
 JWT_ALGORITHM = "HS256"

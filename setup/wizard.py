@@ -806,7 +806,7 @@ function saveToken() { if (cfg.bot_token) goTo(3); else checkToken(); }
 // ── Step 3: Admin ─────────────────────────────────────────────────────────────
 function saveAdmin() {
   const v = document.getElementById("admin-id").value.trim();
-  if (!v || !/^\d+$/.test(v)) { showErr("admin-err", lang==="fa"?"آیدی باید عدد باشد":"ID must be a number"); return; }
+  if (!v || !/^\\d+$/.test(v)) { showErr("admin-err", lang==="fa"?"آیدی باید عدد باشد":"ID must be a number"); return; }
   cfg.admin_id = v; goTo(4);
 }
 

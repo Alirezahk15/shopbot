@@ -2,24 +2,38 @@
 # =============================================================================
 #  ShopBot -- Installer
 #
-#  روش 1 -- نصب مستقیم از اینترنت (یک دستور):
+#  روش 1 -- نصب مستقیم (فقط وقتی ریپو Public است):
 #    sudo bash <(curl -fsSL https://raw.githubusercontent.com/Alirezahk15/shopbot/main/install.sh)
 #
-#  روش 2 -- اجرا از روی پروژه دانلود شده:
+#  روش 2 -- نصب از ریپوی Private با Personal Access Token:
+#    export GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+#    sudo -E bash <(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+#      https://raw.githubusercontent.com/Alirezahk15/shopbot/main/install.sh)
+#
+#  روش 3 -- اجرا از روی سورس دانلودشده (بدون نیاز به گیتهاب):
 #    sudo bash install.sh
 # =============================================================================
 set -euo pipefail
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; BOLD='\033[1m'; NC='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${RED}خطا: با دسترسی root اجرا کنید.${NC}" && exit 1
 
-REPO_URL="https://github.com/Alirezahk15/shopbot.git"
+REPO="Alirezahk15/shopbot"
+REPO_URL="https://github.com/${REPO}.git"
 TMP_DIR="/tmp/shopbot-src"
 PORT=8080
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+
+# برای ریپوی Private، توکن را در آدرس clone تزریق کن
+if [[ -n "$GITHUB_TOKEN" ]]; then
+    CLONE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+else
+    CLONE_URL="$REPO_URL"
+fi
 
 # هدر
-clear
+clear 2>/dev/null || true
 echo -e "${GREEN}${BOLD}"
 echo "  ============================================================"
 echo "  |          ShopBot -- Setup Wizard                        |"
@@ -49,8 +63,35 @@ if [[ -f "$LOCAL_WIZARD" ]]; then
 else
     echo -e "${CYAN}  دانلود ShopBot از GitHub...${NC}"
     rm -rf "$TMP_DIR"
-    git clone --depth=1 "$REPO_URL" "$TMP_DIR" 2>/dev/null \
-        || { echo -e "${RED}  خطا: دانلود ناموفق. اتصال اینترنت را بررسی کنید.${NC}"; exit 1; }
+    if ! git clone --depth=1 "$CLONE_URL" "$TMP_DIR" 2>/tmp/shopbot-clone-error.log; then
+        echo ""
+        echo -e "${RED}  ✗ خطا: دانلود پروژه از GitHub ناموفق بود.${NC}"
+        if [[ -z "$GITHUB_TOKEN" ]]; then
+            echo -e "${YELLOW}  ──────────────────────────────────────────────────────────"
+            echo "  علت رایج: ریپو Private است و بدون توکن قابل دانلود نیست."
+            echo "  (خطای 404 در curl و 'Authentication failed' در git)"
+            echo ""
+            echo "  راه‌حل‌ها (یکی را انتخاب کنید):"
+            echo ""
+            echo "  ۱) ریپو را موقتاً Public کنید:"
+            echo "     GitHub → Settings → Danger Zone → Change visibility → Public"
+            echo "     بعد از اتمام نصب می‌توانید دوباره Private کنید."
+            echo ""
+            echo "  ۲) با Personal Access Token نصب کنید (ریپو Private می‌ماند):"
+            echo "     export GITHUB_TOKEN=ghp_xxxxxxxxxxxx"
+            echo "     sudo -E bash <(curl -fsSL -H \"Authorization: Bearer \$GITHUB_TOKEN\" \\"
+            echo "       https://raw.githubusercontent.com/${REPO}/main/install.sh)"
+            echo ""
+            echo "  ۳) سورس را دستی روی سرور کپی کنید و اجرا کنید:"
+            echo "     sudo bash install.sh"
+            echo -e "  ──────────────────────────────────────────────────────────${NC}"
+        else
+            echo -e "${YELLOW}  توکن GITHUB_TOKEN نامعتبر است یا دسترسی repo ندارد.${NC}"
+            echo "  یک توکن با scope=repo بسازید: GitHub → Settings → Developer settings → Tokens"
+        fi
+        echo -e "${RED}  جزئیات فنی: $(tail -n 1 /tmp/shopbot-clone-error.log 2>/dev/null || echo 'unknown')${NC}"
+        exit 1
+    fi
     WIZARD="${TMP_DIR}/setup/wizard.py"
 fi
 

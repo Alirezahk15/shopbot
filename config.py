@@ -1,12 +1,24 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
+def _require_env(name):
+    """خواندن متغیر محیطی با پیام خطای واضح به‌جای KeyError گنگ"""
+    val = os.environ.get(name)
+    if not val:
+        import sys
+        sys.exit(
+            "\n[ShopBot] متغیر محیطی %s پیدا نشد!\n" % name +
+            "فایل .env کنار config.py وجود ندارد یا ناقص است.\n"
+            "از فایل .env.example یک کپی با نام .env بسازید و مقادیر را پر کنید.\n"
+        )
+    return val
 
 # ---- Secrets (loaded from .env — never hardcode these) ----
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-BSCSCAN_API_KEY = os.environ["BSCSCAN_API_KEY"]
-_USD_RATE_API_KEY = os.environ["USD_RATE_API_KEY"]
+BOT_TOKEN = _require_env("BOT_TOKEN")
+BSCSCAN_API_KEY = _require_env("BSCSCAN_API_KEY")
+_USD_RATE_API_KEY = _require_env("USD_RATE_API_KEY")
 
 ADMIN_IDS = [1663320676]
 SUPPORT_USERNAME = "@akhit77"

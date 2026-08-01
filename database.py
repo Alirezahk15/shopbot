@@ -138,6 +138,8 @@ CREATE TABLE IF NOT EXISTS admin_logs (
             order_id INTEGER, reason TEXT, status TEXT DEFAULT 'pending',
             admin_note TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
+        # جداول تکمیلی: قبل از _migrate ساخته شوند تا ایندکس‌هایشان در نصب تازه هم ساخته شود
+        _ensure_extra_tables(db)
         # migrate: add columns that may not exist in older DBs
         _migrate(db)
 

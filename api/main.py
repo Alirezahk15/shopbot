@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 # Add parent directory to path so we can import database.py
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 from api.auth import create_token, PANEL_PASSWORD, verify_token
 import api.auth as auth_module
