@@ -1,4 +1,4 @@
-﻿import ImageUploader from '../components/ImageUploader.jsx'
+import ImageUploader from '../components/ImageUploader.jsx'
 import { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client.js'

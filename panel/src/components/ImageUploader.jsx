@@ -1,4 +1,4 @@
-﻿import { useState, useCallback, useId } from 'react'
+import { useState, useCallback, useId } from 'react'
 import api from '../api/client.js'
 import { Upload, X, Image as ImageIcon, Link2, Loader2, AlertCircle } from 'lucide-react'
 

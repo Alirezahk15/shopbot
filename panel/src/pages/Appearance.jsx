@@ -1,4 +1,4 @@
-﻿import ImageUploader from '../components/ImageUploader.jsx'
+import ImageUploader from '../components/ImageUploader.jsx'
 import { useState, useEffect } from 'react'
 import { useApp, FONT_STACKS } from '../context/AppContext.jsx'
 import api from '../api/client.js'
