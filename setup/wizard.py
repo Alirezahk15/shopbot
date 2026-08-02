@@ -57,6 +57,7 @@ STEPS = [
     ("nginx", "Nginx and systemd services", 10),
     ("firewall", "Firewall rules", 3),
     ("ssl", "SSL certificate", 7),
+    ("admin", "Create admin account", 3),
     ("launch", "Start services", 5),
 ]
 TOTAL_WEIGHT = sum(w for _, _, w in STEPS)
@@ -464,14 +465,21 @@ def step_env(cfg):
         if m and len(m.group(1).strip()) >= 32:
             jwt = m.group(1).strip()
             _log("Reusing the existing JWT secret so logged-in sessions survive.")
+    admin_id = str(cfg.get("admin_id", "")).strip()
     lines = [
         "# Telegram Bot",
         _env_line("BOT_TOKEN", cfg.get("bot_token", "")),
+        "",
+        "# Admin",
+        # config.py reads ADMIN_IDS from the environment. Writing it here is the
+        # only thing that actually takes effect; patching config.py does not.
+        _env_line("ADMIN_IDS", admin_id),
         "",
         "# Admin Panel",
         _env_line("PANEL_PASSWORD", cfg.get("panel_password", "")),
         _env_line("JWT_SECRET", jwt),
         "PANEL_PORT=8000",
+        "PANEL_TRUST_PROXY=1",
         "PANEL_CORS_ORIGINS=https://" + domain + ",http://" + domain,
         "",
         "# Payment APIs (optional)",
@@ -481,12 +489,6 @@ def step_env(cfg):
     ]
     env_file.write_text("\n".join(lines) + "\n")
     os.chmod(env_file, 0o600)
-
-    cfg_py = INSTALL_DIR / "config.py"
-    if cfg_py.exists():
-        txt = cfg_py.read_text()
-        txt = re.sub(r"ADMIN_IDS\s*=\s*\[.*?\]", "ADMIN_IDS = [" + str(cfg.get("admin_id", "")) + "]", txt)
-        cfg_py.write_text(txt)
     _log(".env written and secured (chmod 600).")
 
 
@@ -818,6 +820,86 @@ def step_ssl(cfg):
     _log("SSL is active for " + domain + " and automatic renewal is enabled.")
 
 
+SEED_ADMIN_SCRIPT = """
+import os, sys
+sys.path.insert(0, {install!r})
+os.chdir({install!r})
+
+for line in open({envfile!r}, encoding="utf-8"):
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    k, v = line.split("=", 1)
+    os.environ.setdefault(k.strip(), v.strip().strip('\"'))
+
+import bcrypt
+import database as db
+
+uid = int(sys.argv[1])
+raw = sys.argv[2].encode("utf-8")[:72]
+pw_hash = bcrypt.hashpw(raw, bcrypt.gensalt(rounds=12)).decode()
+
+db.init_db()
+db.ensure_schema()
+
+with db.get_db() as c:
+    c.execute(
+        "INSERT OR IGNORE INTO admins (user_id, is_super, permissions) VALUES (?,1,'all')",
+        (uid,))
+    c.execute(
+        "UPDATE admins SET is_super=1, permissions='all',"
+        " panel_username=COALESCE(NULLIF(panel_username,''),'admin'),"
+        " panel_password_hash=? WHERE user_id=?",
+        (pw_hash, uid))
+
+print("admin-ready")
+"""
+
+
+def step_admin(cfg):
+    """Write the panel admin row before the services come up.
+
+    Doing this here (rather than lazily on first login) is what makes the
+    password chosen in the wizard actually work.
+    """
+    admin_id = str(cfg.get("admin_id", "")).strip()
+    password = cfg.get("panel_password") or ""
+    if not admin_id or not password:
+        raise InstallError(
+            "Admin account details are missing",
+            "The wizard did not receive a Telegram ID or a panel password.",
+            ["Go back to the Admin Account step and fill both fields."],
+        )
+
+    script = INSTALL_DIR / "_seed_admin.py"
+    try:
+        script.write_text(
+            SEED_ADMIN_SCRIPT.format(
+                install=str(INSTALL_DIR),
+                envfile=str(INSTALL_DIR / ".env"),
+            ),
+            encoding="utf-8",
+        )
+        out = _run(
+            [str(INSTALL_DIR / "venv" / "bin" / "python"), str(script),
+             admin_id, password],
+            shell=False, timeout=180,
+        )
+        if "admin-ready" not in (out or ""):
+            raise InstallError(
+                "Could not create the admin account",
+                (out or "")[-800:],
+                ["Check that the database file is writable by the shopbot user.",
+                 "Retry this step from the installer."],
+            )
+        _log("Admin account ready (username: admin)")
+    finally:
+        try:
+            script.unlink()
+        except Exception:
+            pass
+
+
 def step_launch(cfg):
     _cmd("chown -R shopbot:shopbot " + str(INSTALL_DIR), "Fixing file ownership", 180)
     _run("chmod 600 " + str(INSTALL_DIR) + "/.env", timeout=30)
@@ -861,6 +943,7 @@ STEP_FUNCS = {
     "nginx": step_nginx,
     "firewall": step_firewall,
     "ssl": step_ssl,
+    "admin": step_admin,
     "launch": step_launch,
 }
 
@@ -1036,7 +1119,9 @@ class WizardHandler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/state":
             with _lock:
-                snap = {k: v for k, v in _state.items() if k != "config"}
+                # /api/state needs no auth, so strip every secret.
+                snap = {k: v for k, v in _state.items()
+                        if k not in ("config", "panel_password")}
             self._json(snap)
 
         elif path == "/api/server-info":
@@ -1151,620 +1236,767 @@ class WizardHandler(http.server.BaseHTTPRequestHandler):
 WIZARD_HTML = r"""<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ShopBot Setup</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --p:#6366f1; --p2:#8b5cf6; --p3:#22d3ee;
-  --ok:#10b981; --warn:#f59e0b; --err:#ef4444;
-  --bg:#070810; --card:rgba(18,20,32,.72); --line:rgba(255,255,255,.09);
-  --tx:#e9eaf3; --mut:#8b90a8;
+  --bg:#0E1021; --card:#171929; --card-2:#1C1F33;
+  --primary:#7C5CFF; --primary-hover:#8D70FF; --accent:#5B8DEF;
+  --primary-10:rgba(124,92,255,.10); --primary-15:rgba(124,92,255,.15);
+  --primary-25:rgba(124,92,255,.25); --primary-35:rgba(124,92,255,.35);
+  --primary-60:rgba(124,92,255,.60);
+  --text:#FFFFFF; --text-dim:#A7A8BE;
+  --ok:#33D17A; --err:#FF5A70; --warn:#F5A623;
+  --border:rgba(255,255,255,.10); --radius:16px;
 }
+*{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{
-  font-family:'Vazirmatn',system-ui,sans-serif;background:var(--bg);color:var(--tx);
-  min-height:100vh;overflow-x:hidden;position:relative;
+  background:var(--bg); color:var(--text);
+  font-family:Vazirmatn,IRANSans,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  min-height:100%; display:flex; align-items:center; justify-content:center;
+  padding:28px 16px; position:relative; overflow-x:hidden;
 }
-
-/* ---------- animated background ---------- */
-#bgfx{position:fixed;inset:0;z-index:0;overflow:hidden;pointer-events:none}
-.orb{position:absolute;border-radius:50%;filter:blur(90px);opacity:.5;animation:float 18s ease-in-out infinite}
-.orb.a{width:520px;height:520px;background:radial-gradient(circle,#6366f1,transparent 70%);top:-140px;right:-120px}
-.orb.b{width:460px;height:460px;background:radial-gradient(circle,#8b5cf6,transparent 70%);bottom:-160px;left:-120px;animation-delay:-6s}
-.orb.c{width:380px;height:380px;background:radial-gradient(circle,#22d3ee,transparent 70%);top:38%;left:44%;animation-delay:-12s;opacity:.28}
-@keyframes float{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(40px,-45px) scale(1.12)}66%{transform:translate(-35px,35px) scale(.92)}}
-#grid{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.35;
-  background-image:linear-gradient(rgba(255,255,255,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px);
-  background-size:52px 52px;mask-image:radial-gradient(ellipse 80% 60% at 50% 40%,#000 30%,transparent 100%)}
-canvas#stars{position:fixed;inset:0;z-index:0;pointer-events:none}
-
-/* ---------- shell ---------- */
-.wrap{position:relative;z-index:2;max-width:920px;margin:0 auto;padding:2.2rem 1.1rem 3.5rem}
-.logo{display:flex;align-items:center;justify-content:center;gap:.75rem;margin-bottom:.4rem;animation:dropIn .7s cubic-bezier(.2,.9,.25,1.2) both}
-.logo .mark{width:46px;height:46px;border-radius:14px;background:linear-gradient(135deg,var(--p),var(--p2));
-  display:grid;place-items:center;font-size:1.4rem;box-shadow:0 8px 28px rgba(99,102,241,.45);animation:pulseGlow 3s ease-in-out infinite}
-@keyframes pulseGlow{0%,100%{box-shadow:0 8px 28px rgba(99,102,241,.4)}50%{box-shadow:0 8px 44px rgba(139,92,246,.75)}}
-.logo h1{font-size:1.6rem;font-weight:800;background:linear-gradient(90deg,#fff,#a5b4fc,#22d3ee,#fff);
-  background-size:280% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shine 6s linear infinite}
-@keyframes shine{to{background-position:280% 0}}
-.sub{text-align:center;color:var(--mut);font-size:.86rem;margin-bottom:1.4rem;animation:dropIn .7s .1s both}
-@keyframes dropIn{from{opacity:0;transform:translateY(-16px)}to{opacity:1;transform:none}}
-
-/* ---------- top bar ---------- */
-.topbar{position:fixed;top:14px;inset-inline-end:16px;z-index:20;display:flex;gap:.5rem}
-.chip{background:rgba(255,255,255,.07);border:1px solid var(--line);color:var(--tx);
-  padding:.4rem .8rem;border-radius:999px;font-size:.78rem;cursor:pointer;
-  backdrop-filter:blur(12px);transition:.25s;font-family:inherit}
-.chip:hover{background:rgba(99,102,241,.24);border-color:rgba(99,102,241,.5);transform:translateY(-2px)}
-
-/* ---------- stepper ---------- */
-.stepper{display:flex;align-items:center;justify-content:center;gap:0;margin-bottom:1.6rem;flex-wrap:nowrap}
-.dot{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-size:.76rem;font-weight:700;
-  background:rgba(255,255,255,.06);border:1px solid var(--line);color:var(--mut);
-  transition:.4s cubic-bezier(.2,.9,.25,1.2);flex-shrink:0}
-.dot.on{background:linear-gradient(135deg,var(--p),var(--p2));color:#fff;border-color:transparent;
-  transform:scale(1.22);box-shadow:0 0 0 5px rgba(99,102,241,.16),0 6px 18px rgba(99,102,241,.4)}
-.dot.ok{background:var(--ok);color:#fff;border-color:transparent}
-.bar{height:2px;width:34px;background:rgba(255,255,255,.09);position:relative;overflow:hidden;flex-shrink:0}
-.bar i{position:absolute;inset:0;width:0;background:linear-gradient(90deg,var(--p),var(--ok));transition:width .5s ease}
-.bar.done i{width:100%}
-
-/* ---------- card ---------- */
-.card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:2rem 1.7rem;
-  backdrop-filter:blur(22px);box-shadow:0 24px 70px rgba(0,0,0,.6);position:relative;overflow:hidden}
-.card::before{content:"";position:absolute;top:0;inset-inline:0;height:1px;
-  background:linear-gradient(90deg,transparent,rgba(139,92,246,.85),transparent);animation:scan 3.4s linear infinite}
-@keyframes scan{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+body::before{
+  content:''; position:fixed; inset:0; pointer-events:none; z-index:0;
+  background-image:linear-gradient(rgba(255,255,255,.045) 1px,transparent 1px),
+                   linear-gradient(90deg,rgba(255,255,255,.045) 1px,transparent 1px);
+  background-size:44px 44px;
+  -webkit-mask-image:radial-gradient(ellipse at center,black 30%,transparent 75%);
+  mask-image:radial-gradient(ellipse at center,black 30%,transparent 75%);
+}
+body::after{
+  content:''; position:fixed; top:50%; left:50%; width:620px; height:620px;
+  transform:translate(-50%,-50%); pointer-events:none; z-index:0;
+  background:radial-gradient(circle,rgba(124,92,255,.18) 0%,transparent 70%);
+  filter:blur(40px);
+}
+.wrap{position:relative;z-index:1;width:100%;max-width:520px}
+.brand{display:flex;flex-direction:column;align-items:center;gap:14px;margin-bottom:22px;text-align:center}
+.logo{
+  width:60px;height:60px;border-radius:18px;display:grid;place-items:center;
+  background:linear-gradient(135deg,var(--primary),var(--accent));
+  box-shadow:0 8px 26px var(--primary-35);
+}
+.logo svg{width:32px;height:32px;stroke:#fff;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.brand h1{font-size:21px;font-weight:700;letter-spacing:.2px}
+.brand p{font-size:13.5px;color:var(--text-dim);line-height:1.7}
+.card{
+  background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
+  padding:28px 26px; box-shadow:0 22px 60px rgba(0,0,0,.45);
+}
+.stepper{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.dot{height:5px;flex:1;border-radius:99px;background:rgba(255,255,255,.09);transition:background .35s,box-shadow .35s}
+.dot.on{background:linear-gradient(90deg,var(--primary),var(--accent));box-shadow:0 0 12px var(--primary-35)}
+.dot.done{background:var(--primary-60)}
+.smeta{display:flex;justify-content:space-between;font-size:12px;color:var(--text-dim);margin-bottom:22px}
+.smeta b{color:var(--text);font-weight:600}
 .pane{display:none}
-.pane.on{display:block;animation:slideUp .5s cubic-bezier(.2,.9,.25,1.1)}
-@keyframes slideUp{from{opacity:0;transform:translateY(22px) scale(.985)}to{opacity:1;transform:none}}
-h2{font-size:1.28rem;font-weight:700;margin-bottom:.4rem}
-.desc{color:var(--mut);font-size:.87rem;line-height:1.85;margin-bottom:1.4rem}
-
-/* ---------- fields ---------- */
-.field{margin-bottom:1.1rem;animation:fadeUp .45s both}
-.field:nth-child(2){animation-delay:.05s}.field:nth-child(3){animation-delay:.1s}
-@keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
-label{display:block;font-size:.83rem;font-weight:600;margin-bottom:.45rem}
-.hint{font-size:.75rem;color:var(--mut);margin-top:.35rem;line-height:1.7}
-input[type=text],input[type=password],input[type=number]{
-  width:100%;padding:.8rem .95rem;background:rgba(8,9,17,.85);border:1px solid var(--line);
-  border-radius:12px;color:var(--tx);font-family:inherit;font-size:.9rem;transition:.25s;direction:ltr;text-align:left}
-input:focus{outline:none;border-color:var(--p);box-shadow:0 0 0 3px rgba(99,102,241,.16);background:rgba(12,14,26,.95)}
-input.bad{border-color:var(--err);animation:shake .35s}
-input.good{border-color:var(--ok)}
-@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-7px)}75%{transform:translateX(7px)}}
-.err{color:var(--err);font-size:.78rem;margin-top:.35rem;display:none}
-.err.show{display:block;animation:fadeUp .3s}
-
-.check{display:flex;align-items:center;gap:.6rem;padding:.85rem 1rem;background:rgba(8,9,17,.7);
-  border:1px solid var(--line);border-radius:12px;cursor:pointer;transition:.25s;margin-bottom:.7rem}
-.check:hover{border-color:rgba(99,102,241,.45);transform:translateX(-3px)}
-.check.sel{border-color:rgba(99,102,241,.6);background:rgba(99,102,241,.09)}
-.check input{width:1.05rem;height:1.05rem;accent-color:var(--p);flex-shrink:0}
-.check .ico{font-size:1.1rem}
-
-/* ---------- buttons ---------- */
-.row{display:flex;gap:.7rem;margin-top:1.6rem}
-button.btn{flex:1;padding:.85rem 1.2rem;border:none;border-radius:12px;font-family:inherit;
-  font-size:.9rem;font-weight:700;cursor:pointer;transition:.25s;position:relative;overflow:hidden}
-.pri{background:linear-gradient(135deg,var(--p),var(--p2));color:#fff;box-shadow:0 6px 22px rgba(99,102,241,.35)}
-.pri:hover{transform:translateY(-2px);box-shadow:0 10px 30px rgba(99,102,241,.55)}
-.pri:disabled{opacity:.5;cursor:not-allowed;transform:none}
-.sec{background:rgba(255,255,255,.07);color:var(--tx);border:1px solid var(--line)}
-.sec:hover{background:rgba(255,255,255,.13)}
-.ghost{background:transparent;color:var(--mut);border:1px solid var(--line)}
-.ghost:hover{color:var(--tx);border-color:var(--p)}
-.pri::after{content:"";position:absolute;top:0;inset-inline-start:-100%;width:100%;height:100%;
-  background:linear-gradient(90deg,transparent,rgba(255,255,255,.28),transparent)}
-.pri:hover::after{animation:sweep .7s}
-@keyframes sweep{to{inset-inline-start:100%}}
-
-.badge{display:inline-block;padding:.16rem .55rem;border-radius:6px;font-size:.74rem;font-weight:600}
-.b-g{background:rgba(16,185,129,.18);color:#34d399}
-.b-r{background:rgba(239,68,68,.18);color:#f87171}
-.b-y{background:rgba(245,158,11,.18);color:#fbbf24}
-
-.spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.28);
-  border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
+.pane.on{display:block;animation:slideUp .38s cubic-bezier(.22,.9,.3,1) both}
+@keyframes slideUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+.ptitle{font-size:17px;font-weight:700;margin-bottom:6px}
+.psub{font-size:13px;color:var(--text-dim);line-height:1.8;margin-bottom:20px}
+.form-label{display:block;font-size:12px;font-weight:600;color:var(--text-dim);margin:0 0 7px 2px;letter-spacing:.3px}
+.field{position:relative;margin-bottom:16px}
+.input{
+  width:100%; padding:13px 15px; font:inherit; font-size:14px; color:var(--text);
+  background:rgba(255,255,255,.06); border:1px solid var(--border);
+  border-radius:11px; outline:none; transition:border-color .2s,box-shadow .2s;
+}
+.input::placeholder{color:#6E7089}
+.input:focus{border-color:var(--primary-60);box-shadow:0 0 0 3px var(--primary-15)}
+.input.pw{padding-inline-end:44px}
+.input:disabled{opacity:.55}
+.eye{
+  position:absolute; inset-inline-end:12px; top:50%; transform:translateY(-50%);
+  background:none;border:none;cursor:pointer;color:var(--text-dim);
+  display:grid;place-items:center;padding:4px;
+}
+.eye:hover{color:var(--text)}
+.eye svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8}
+.btn{
+  width:100%; padding:13px 18px; font:inherit; font-size:14.5px; font-weight:600;
+  border:none; border-radius:11px; cursor:pointer; color:#fff;
+  display:flex; align-items:center; justify-content:center; gap:9px;
+  transition:transform .15s,box-shadow .2s,opacity .2s;
+}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-primary{background:linear-gradient(135deg,var(--primary),var(--accent));box-shadow:0 4px 15px var(--primary-35)}
+.btn-primary:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 7px 22px var(--primary-35)}
+.btn-secondary{background:rgba(255,255,255,.07);border:1px solid var(--border)}
+.btn-secondary:hover:not(:disabled){background:rgba(255,255,255,.11)}
+.btn-ghost{background:none;color:var(--text-dim);font-size:13px;font-weight:500;padding:10px}
+.btn-ghost:hover{color:var(--primary-hover)}
+.row{display:flex;gap:10px;margin-top:6px}
+.row .btn{flex:1}
+.alert{
+  display:flex; gap:10px; align-items:flex-start; padding:12px 14px; border-radius:11px;
+  font-size:12.8px; line-height:1.75; margin-bottom:16px; animation:slideUp .25s both;
+}
+.alert svg{width:17px;height:17px;flex:0 0 17px;margin-top:2px;stroke:currentColor;fill:none;stroke-width:1.9}
+.alert.err{background:rgba(255,90,112,.11);border:1px solid rgba(255,90,112,.30);color:#FFB3BD}
+.alert.ok{background:rgba(51,209,122,.11);border:1px solid rgba(51,209,122,.30);color:#8FE9B8}
+.alert.warn{background:rgba(245,166,35,.11);border:1px solid rgba(245,166,35,.30);color:#F7CE8C}
+.alert.info{background:var(--primary-10);border:1px solid var(--primary-25);color:#C3B4FF}
+.hint{font-size:11.8px;color:var(--text-dim);line-height:1.8;margin-top:-8px;margin-bottom:16px}
+.hint a{color:var(--primary-hover);text-decoration:none}
+.hint a:hover{text-decoration:underline}
+.spin{width:16px;height:16px;border:2px solid rgba(255,255,255,.28);border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
-
-table.rev{width:100%;border-collapse:collapse;font-size:.86rem}
-table.rev td{padding:.65rem .5rem;border-bottom:1px solid rgba(255,255,255,.06)}
-table.rev td:first-child{color:var(--mut);width:42%}
+.bar{height:7px;border-radius:99px;background:rgba(255,255,255,.08);overflow:hidden;margin-bottom:9px}
+.bar i{display:block;height:100%;width:0;border-radius:99px;background:linear-gradient(90deg,var(--primary),var(--accent));box-shadow:0 0 14px var(--primary-35);transition:width .5s cubic-bezier(.3,.9,.4,1)}
+.barmeta{display:flex;justify-content:space-between;font-size:12px;color:var(--text-dim);margin-bottom:18px}
+.tasks{list-style:none;display:flex;flex-direction:column;gap:2px;margin-bottom:16px}
+.tasks li{display:flex;align-items:center;gap:10px;font-size:13px;padding:7px 2px;color:var(--text-dim);transition:color .3s}
+.tasks li.run{color:var(--text)}
+.tasks li.done{color:#8FE9B8}
+.tasks li.fail{color:#FFB3BD}
+.tico{width:17px;height:17px;flex:0 0 17px;display:grid;place-items:center}
+.tico svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.tico .pend{width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.20)}
+.term{
+  display:none; background:#0A0C18; border:1px solid var(--border); border-radius:11px;
+  padding:12px 14px; max-height:190px; overflow-y:auto; margin-bottom:14px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11.5px;
+  line-height:1.85; direction:ltr; text-align:left; color:#9AA0B4;
+}
+.term.on{display:block}
+.term div{white-space:pre-wrap;word-break:break-word}
+.term .l-ok{color:#8FE9B8}
+.term .l-err{color:#FFB3BD}
+.term .l-warn{color:#F7CE8C}
+.term::-webkit-scrollbar{width:6px}
+.term::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:99px}
+.kv{display:flex;flex-direction:column;gap:9px;margin-bottom:20px}
+.kv .r{
+  display:flex;align-items:center;gap:10px;background:var(--card-2);
+  border:1px solid var(--border);border-radius:11px;padding:11px 13px;
+}
+.kv .k{font-size:11.5px;color:var(--text-dim);flex:0 0 82px;font-weight:600}
+.kv .v{flex:1;font-size:13px;word-break:break-all;direction:ltr;text-align:left;font-family:ui-monospace,Menlo,Consolas,monospace}
+.cp{background:none;border:none;cursor:pointer;color:var(--text-dim);padding:4px;display:grid;place-items:center;border-radius:6px}
+.cp:hover{color:var(--primary-hover);background:var(--primary-10)}
+.cp svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8}
+.pop{width:66px;height:66px;border-radius:50%;display:grid;place-items:center;margin:0 auto 18px;
+  background:rgba(51,209,122,.13);border:1px solid rgba(51,209,122,.35);animation:pop .5s cubic-bezier(.2,1.5,.4,1) both}
+@keyframes pop{from{opacity:0;transform:scale(.5)}to{opacity:1;transform:scale(1)}}
+.pop svg{width:32px;height:32px;stroke:var(--ok);fill:none;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+.lang{
+  position:fixed;top:18px;inset-inline-end:18px;z-index:5;
+  background:rgba(255,255,255,.07);border:1px solid var(--border);color:var(--text-dim);
+  border-radius:9px;padding:7px 13px;font:inherit;font-size:12px;font-weight:600;cursor:pointer;
+  display:flex;align-items:center;gap:6px;
+}
+.lang:hover{color:var(--text);border-color:var(--primary-60)}
+.lang svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8}
+.foot{text-align:center;font-size:11.5px;color:#5E6178;margin-top:20px;line-height:1.9}
+.foot code{background:rgba(255,255,255,.07);padding:2px 7px;border-radius:5px;font-size:11px;color:var(--text-dim)}
+@media(max-width:520px){.card{padding:22px 18px}.brand h1{font-size:19px}}
 </style>
 </head>
 <body>
-<div id="bgfx"><div class="orb a"></div><div class="orb b"></div><div class="orb c"></div></div>
-<div id="grid"></div>
-<canvas id="stars"></canvas>
 
-<div class="topbar">
-  <button class="chip" onclick="setLang(lang==='fa'?'en':'fa')" id="lang-btn">EN</button>
-</div>
+<button class="lang" id="langBtn">
+  <svg viewBox="0 0 24 24"><path d="M5 8h14M9 5v3M11 17l4-9 4 9M12.5 14h5.5"/><path d="M5 8c0 4 3 7 7 8"/></svg>
+  <span id="langTxt">EN</span>
+</button>
 
 <div class="wrap">
-  <div class="logo"><div class="mark">&#128722;</div><h1>ShopBot</h1></div>
-  <div class="sub" id="tagline">Automated installer &amp; setup wizard</div>
 
-  <div class="stepper" id="stepper"></div>
+  <div class="brand">
+    <div class="logo">
+      <svg viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V5M9 14h.01M15 14h.01M2 13v3M22 13v3"/><circle cx="12" cy="4" r="1.4"/></svg>
+    </div>
+    <div>
+      <h1 id="bTitle">نصب ShopBot</h1>
+      <p id="bSub">ربات فروشگاهی تلگرام و پنل مدیریت</p>
+    </div>
+  </div>
 
   <div class="card">
-    <!-- 0 WELCOME -->
-    <div class="pane on" id="p0">
-      <h2 id="w-h">Welcome</h2>
-      <div class="desc" id="w-p">This wizard installs ShopBot end to end.</div>
-      <div id="resume-box"></div>
-      <div class="check sel"><span class="ico">&#129302;</span><span id="f1">Telegram shop bot</span></div>
-      <div class="check sel"><span class="ico">&#128202;</span><span id="f2">React admin panel</span></div>
-      <div class="check sel"><span class="ico">&#128179;</span><span id="f3">Card, USDT, TON, Zarinpal payments</span></div>
-      <div class="check sel"><span class="ico">&#128274;</span><span id="f4">Nginx, systemd, UFW and free SSL</span></div>
-      <div class="row"><button class="btn pri" onclick="go(1)" id="w-b">Start</button></div>
+    <div class="stepper" id="stepper"></div>
+    <div class="smeta">
+      <span id="stepNow"></span>
+      <b id="stepName"></b>
     </div>
 
-    <!-- 1 BOT TOKEN -->
-    <div class="pane" id="p1">
-      <h2 id="s1-h">Bot token</h2>
-      <div class="desc" id="s1-p">Create a bot with @BotFather and paste the token here.</div>
+    <div id="alertBox"></div>
+
+    <!-- 0 welcome -->
+    <div class="pane on" data-p="0">
+      <div class="ptitle" id="t0"></div>
+      <div class="psub" id="s0"></div>
+      <div id="resumeBox"></div>
+      <button class="btn btn-primary" id="b0"></button>
+    </div>
+
+    <!-- 1 domain -->
+    <div class="pane" data-p="1">
+      <div class="ptitle" id="t1"></div>
+      <div class="psub" id="s1"></div>
+      <label class="form-label" id="h1"></label>
+      <div class="field"><input class="input" id="domain" dir="ltr" placeholder="bot.example.com" autocomplete="off"></div>
+      <div id="emailField" style="display:none">
+        <label class="form-label" id="h1b"></label>
+        <div class="field"><input class="input" id="email" dir="ltr" type="email" placeholder="you@example.com" autocomplete="off"></div>
+      </div>
+      <div id="domainMsg"></div>
+      <button class="btn btn-primary" id="nextDomain"></button>
+      <button class="btn btn-ghost" id="skipDomain"></button>
+    </div>
+
+    <!-- 2 telegram -->
+    <div class="pane" data-p="2">
+      <div class="ptitle" id="t2"></div>
+      <div class="psub" id="s2"></div>
+      <label class="form-label" id="h2"></label>
+      <div class="field"><input class="input" id="token" dir="ltr" placeholder="1234567890:AAE..." autocomplete="off"></div>
+      <div class="hint" id="i2"></div>
+      <div id="tokenMsg"></div>
+      <button class="btn btn-primary" id="nextToken"></button>
+    </div>
+
+    <!-- 3 admin -->
+    <div class="pane" data-p="3">
+      <div class="ptitle" id="t3"></div>
+      <div class="psub" id="s3"></div>
+      <label class="form-label" id="h3"></label>
+      <div class="field"><input class="input" id="adminId" dir="ltr" inputmode="numeric" placeholder="123456789" autocomplete="off"></div>
+      <div class="hint" id="i3"></div>
+      <label class="form-label" id="h3b"></label>
       <div class="field">
-        <label id="s1-l">Bot Token</label>
-        <input type="text" id="bot-token" placeholder="123456789:AAE..." autocomplete="off">
-        <div class="err" id="e-token"></div>
-        <div class="hint" id="s1-hint">Send /newbot to @BotFather in Telegram.</div>
+        <input class="input pw" id="pass" type="password" autocomplete="new-password">
+        <button class="eye" data-for="pass"><svg viewBox="0 0 24 24"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></button>
       </div>
-      <div class="row">
-        <button class="btn sec" onclick="go(0)" id="b-back1">Back</button>
-        <button class="btn pri" onclick="checkToken()" id="b-next1">Verify &amp; continue</button>
-      </div>
-    </div>
-
-    <!-- 2 ADMIN ID -->
-    <div class="pane" id="p2">
-      <h2 id="s2-h">Admin account</h2>
-      <div class="desc" id="s2-p">Your numeric Telegram ID becomes the bot owner.</div>
+      <label class="form-label" id="h3c"></label>
       <div class="field">
-        <label id="s2-l">Telegram numeric ID</label>
-        <input type="text" id="admin-id" placeholder="123456789" inputmode="numeric">
-        <div class="err" id="e-admin"></div>
-        <div class="hint" id="s2-hint">Get it from @userinfobot.</div>
+        <input class="input pw" id="pass2" type="password" autocomplete="new-password">
+        <button class="eye" data-for="pass2"><svg viewBox="0 0 24 24"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></button>
       </div>
-      <div class="row">
-        <button class="btn sec" onclick="go(1)" id="b-back2">Back</button>
-        <button class="btn pri" onclick="saveAdmin()" id="b-next2">Next</button>
-      </div>
+      <div id="adminMsg"></div>
+      <button class="btn btn-primary" id="startInstall"></button>
     </div>
 
-    <!-- 3 DOMAIN + SSL -->
-    <div class="pane" id="p3">
-      <h2 id="s3-h">Domain &amp; panel</h2>
-      <div class="desc" id="s3-p">Point your domain A record to this server first.</div>
-      <div class="field">
-        <label id="s3-l1">Domain or server IP</label>
-        <input type="text" id="domain" placeholder="shop.example.com">
-        <div class="err" id="e-domain"></div>
-        <div class="hint" id="dns-status"></div>
-      </div>
-      <div class="field">
-        <label id="s3-l2">Admin panel password</label>
-        <input type="password" id="panel-pass" placeholder="At least 8 characters">
-        <div class="err" id="e-pass"></div>
-      </div>
-      <div class="check sel" id="ssl-wrap" onclick="toggleSsl()">
-        <input type="checkbox" id="ssl-check" checked onclick="event.stopPropagation();toggleSsl(1)">
-        <span class="ico">&#128274;</span><span id="s3-ssl">Install free SSL (Let's Encrypt)</span>
-      </div>
-      <div class="hint" id="ssl-note">If SSL fails, the installer automatically restores a working HTTP site and lets you retry SSL alone.</div>
-      <div class="row">
-        <button class="btn sec" onclick="go(2)" id="b-back3">Back</button>
-        <button class="btn pri" onclick="saveDomain()" id="b-next3">Next</button>
-      </div>
+    <!-- 4 install -->
+    <div class="pane" data-p="4">
+      <div class="ptitle" id="t4"></div>
+      <div class="psub" id="s4"></div>
+      <div class="bar"><i id="barFill"></i></div>
+      <div class="barmeta"><span id="barLabel"></span><b id="barPct">0%</b></div>
+      <ul class="tasks" id="tasks"></ul>
+      <button class="btn btn-ghost" id="toggleLog"></button>
+      <div class="term" id="term"></div>
+      <div id="installMsg"></div>
+      <div id="installActions"></div>
     </div>
 
-    <!-- 4 PAYMENTS -->
-    <div class="pane" id="p4">
-      <h2 id="s4-h">Payment methods</h2>
-      <div class="desc" id="s4-p">Enable the methods you want. You can change these later.</div>
-      <div class="check sel" onclick="togglePay('card',this)"><input type="checkbox" id="pay-card" checked><span class="ico">&#128179;</span><span>Card to card</span></div>
-      <div class="check" onclick="togglePay('bep20',this)"><input type="checkbox" id="pay-bep20"><span class="ico">&#127974;</span><span>USDT BEP20</span></div>
-      <div class="check" onclick="togglePay('trc20',this)"><input type="checkbox" id="pay-trc20"><span class="ico">&#127974;</span><span>USDT TRC20</span></div>
-      <div class="check" onclick="togglePay('ton',this)"><input type="checkbox" id="pay-ton"><span class="ico">&#128142;</span><span>TON</span></div>
-      <div class="check" onclick="togglePay('zarinpal',this)"><input type="checkbox" id="pay-zarinpal"><span class="ico">&#127974;</span><span>Zarinpal</span></div>
-      <div class="row">
-        <button class="btn sec" onclick="go(3)" id="b-back4">Back</button>
-        <button class="btn pri" onclick="savePays()" id="b-next4">Next</button>
-      </div>
+    <!-- 5 finish -->
+    <div class="pane" data-p="5">
+      <div class="pop"><svg viewBox="0 0 24 24"><path d="m4 12.5 5.2 5L20 7"/></svg></div>
+      <div class="ptitle" style="text-align:center" id="t5"></div>
+      <div class="psub" style="text-align:center" id="s5"></div>
+      <div id="w5"></div>
+      <div class="kv" id="creds"></div>
+      <button class="btn btn-primary" id="goPanel"></button>
+      <div class="foot" id="f5"></div>
     </div>
-
-    <!-- 5 API KEYS -->
-    <div class="pane" id="p5">
-      <h2 id="s5-h">API keys</h2>
-      <div class="desc" id="s5-p">Optional. You can leave them empty and add them later in the panel.</div>
-      <div id="api-fields"></div>
-      <div class="row">
-        <button class="btn sec" onclick="go(4)" id="b-back5">Back</button>
-        <button class="btn pri" onclick="saveKeys()" id="b-next5">Next</button>
-      </div>
-    </div>
-
-    <!-- 6 REVIEW -->
-    <div class="pane" id="p6">
-      <h2 id="s6-h">Review</h2>
-      <div class="desc" id="s6-p">Check everything, then start the installation.</div>
-      <table class="rev" id="review"></table>
-      <div class="row">
-        <button class="btn sec" onclick="go(5)" id="b-back6">Back</button>
-        <button class="btn pri" onclick="startInstall()" id="b-install">Install now</button>
-      </div>
-    </div>
-
-    <!-- 7 PROGRESS -->
-    <div class="pane" id="p7">
-      <h2 id="s7-h">Installing</h2>
-      <div class="desc" id="s7-p">Keep this page open. Each step is saved, so a failure never restarts the whole install.</div>
-
-      <div style="margin-bottom:1rem">
-        <div style="display:flex;justify-content:space-between;font-size:.8rem;margin-bottom:.4rem">
-          <span id="cur-step">Preparing...</span><span id="pct">0%</span>
-        </div>
-        <div style="height:9px;background:rgba(255,255,255,.07);border-radius:99px;overflow:hidden">
-          <div id="pbar" style="height:100%;width:0;border-radius:99px;transition:width .55s cubic-bezier(.2,.9,.25,1);
-            background:linear-gradient(90deg,#6366f1,#8b5cf6,#22d3ee);background-size:200% 100%;animation:shine 2.2s linear infinite"></div>
-        </div>
-      </div>
-
-      <div id="steplist" style="margin-bottom:1rem"></div>
-
-      <div id="console" style="background:#05060c;border:1px solid var(--line);border-radius:12px;
-        padding:.9rem;height:240px;overflow-y:auto;font-family:'JetBrains Mono',monospace;
-        font-size:.74rem;line-height:1.75;direction:ltr;text-align:left;white-space:pre-wrap"></div>
-
-      <div id="errbox"></div>
-    </div>
-
-    <!-- 8 DONE -->
-    <div class="pane" id="p8">
-      <div style="text-align:center;padding:1rem 0 1.4rem">
-        <div style="font-size:3.6rem;animation:pop .7s cubic-bezier(.2,1.6,.4,1)">&#127881;</div>
-        <h2 style="margin-top:.6rem" id="s8-h">Installation complete</h2>
-      </div>
-      <table class="rev" id="final"></table>
-      <div class="row"><button class="btn pri" onclick="openPanel()" id="b-open">Open admin panel</button></div>
-    </div>
-
   </div>
+
+  <div class="foot" id="pageFoot"></div>
 </div>
-<style>@keyframes pop{0%{transform:scale(0) rotate(-25deg)}70%{transform:scale(1.25) rotate(8deg)}100%{transform:scale(1) rotate(0)}}</style>
+
 <script>
-// ---------- animated starfield ----------
-(function(){
-  var c=document.getElementById('stars'),x=c.getContext('2d'),ps=[],n=70;
-  function size(){c.width=innerWidth;c.height=innerHeight}
-  size();addEventListener('resize',size);
-  for(var i=0;i<n;i++)ps.push({x:Math.random()*c.width,y:Math.random()*c.height,
-    r:Math.random()*1.6+.3,vx:(Math.random()-.5)*.22,vy:(Math.random()-.5)*.22,a:Math.random()*.5+.15});
-  (function loop(){
-    x.clearRect(0,0,c.width,c.height);
-    for(var i=0;i<n;i++){var p=ps[i];p.x+=p.vx;p.y+=p.vy;
-      if(p.x<0)p.x=c.width;if(p.x>c.width)p.x=0;if(p.y<0)p.y=c.height;if(p.y>c.height)p.y=0;
-      x.beginPath();x.arc(p.x,p.y,p.r,0,6.284);x.fillStyle='rgba(165,180,252,'+p.a+')';x.fill();}
-    for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
-      var dx=ps[i].x-ps[j].x,dy=ps[i].y-ps[j].y,d=dx*dx+dy*dy;
-      if(d<14000){x.beginPath();x.moveTo(ps[i].x,ps[i].y);x.lineTo(ps[j].x,ps[j].y);
-        x.strokeStyle='rgba(99,102,241,'+(1-d/14000)*.13+')';x.lineWidth=.6;x.stroke();}}
-    requestAnimationFrame(loop);
-  })();
-})();
+/* ------------------------------------------------------------------ i18n */
+var T = {
+  fa: {
+    bTitle:'نصب ShopBot', bSub:'ربات فروشگاهی تلگرام و پنل مدیریت',
+    stepOf:'گام %1 از %2',
+    n0:'خوش‌آمد', n1:'دامنه', n2:'تلگرام', n3:'حساب مدیر', n4:'نصب', n5:'پایان',
+    t0:'به نصب‌کننده خوش آمدید',
+    s0:'در چند گام ساده، ربات و پنل مدیریت روی این سرور نصب می‌شود. فقط کافی است توکن ربات و شناسهٔ تلگرام خود را آماده داشته باشید.',
+    b0:'شروع نصب',
+    t1:'دامنه و گواهی SSL',
+    s1:'اگر دامنه دارید، پنل روی HTTPS امن اجرا می‌شود. اگر ندارید، این گام را رد کنید — بعداً هم می‌توانید دامنه اضافه کنید.',
+    h1:'دامنه', h1b:'ایمیل (برای یادآوری تمدید گواهی)',
+    nextDomain:'بررسی دامنه و ادامه', skipDomain:'دامنه ندارم، با IP ادامه بده',
+    dChecking:'در حال بررسی DNS…',
+    dBad:'قالب دامنه درست نیست. مثلاً bot.example.com',
+    dOk:'دامنه به این سرور اشاره می‌کند.',
+    dMiss:'دامنه به %1 اشاره می‌کند ولی IP این سرور %2 است. می‌توانید ادامه دهید، ولی گواهی SSL صادر نمی‌شود.',
+    dGo:'به هر حال ادامه بده',
+    t2:'اتصال به تلگرام',
+    s2:'توکن رباتی که از BotFather گرفته‌اید را اینجا بچسبانید.',
+    h2:'توکن ربات',
+    i2:'در تلگرام به <a href="https://t.me/BotFather" target="_blank">BotFather@</a> پیام دهید، newbot/ را بزنید و توکن را کپی کنید.',
+    nextToken:'بررسی توکن و ادامه',
+    tChecking:'در حال بررسی توکن…',
+    tEmpty:'توکن ربات را وارد کنید.',
+    tOk:'توکن معتبر است — %1',
+    tBad:'توکن پذیرفته نشد. دوباره از BotFather کپی کنید.',
+    t3:'حساب مدیر',
+    s3:'این حساب برای ورود به پنل مدیریت و بازیابی رمز استفاده می‌شود.',
+    h3:'شناسهٔ عددی تلگرام',
+    i3:'به <a href="https://t.me/userinfobot" target="_blank">userinfobot@</a> پیام دهید — عددی که می‌دهد همین است.',
+    h3b:'رمز عبور پنل', h3c:'تکرار رمز عبور',
+    startInstall:'شروع نصب',
+    aId:'شناسهٔ عددی تلگرام را وارد کنید (فقط عدد).',
+    aLen:'رمز عبور باید حداقل ۸ نویسه باشد.',
+    aAscii:'برای رمز عبور فقط از حروف انگلیسی، عدد و علائم استفاده کنید.',
+    aMatch:'دو رمز عبور یکسان نیستند.',
+    t4:'در حال نصب',
+    s4:'این کار بین ۳ تا ۸ دقیقه طول می‌کشد. این صفحه را نبندید.',
+    showLog:'نمایش جزئیات فنی', hideLog:'پنهان کردن جزئیات',
+    failed:'نصب متوقف شد', retry:'تلاش دوباره',
+    t5:'نصب کامل شد',
+    s5:'اطلاعات زیر را همین حالا ذخیره کنید — پس از بستن این صفحه دیگر نمایش داده نمی‌شوند.',
+    kUrl:'آدرس پنل', kUser:'نام کاربری', kPass:'رمز عبور',
+    goPanel:'ورود به پنل مدیریت',
+    f5:'برای مدیریت بعدی کافی است در سرور دستور <code>shopbot</code> را بزنید.',
+    sslWarn:'گواهی SSL صادر نشد، ولی نصب کامل است. بعداً با دستور shopbot گزینهٔ ۱۱ دوباره تلاش کنید.',
+    resume:'یک نصب ناتمام پیدا شد. می‌خواهید ادامه دهید یا از اول شروع کنید؟',
+    btnResume:'ادامهٔ نصب', btnFresh:'شروع از اول',
+    copied:'کپی شد', netErr:'ارتباط با سرور قطع شد. صفحه را تازه کنید.',
+    foot:'نصب‌کنندهٔ ShopBot'
+  },
+  en: {
+    bTitle:'Install ShopBot', bSub:'Telegram shop bot and admin panel',
+    stepOf:'Step %1 of %2',
+    n0:'Welcome', n1:'Domain', n2:'Telegram', n3:'Admin', n4:'Install', n5:'Finish',
+    t0:'Welcome to the installer',
+    s0:'This will set up the bot and the admin panel on this server in a few short steps. Have your bot token and your Telegram ID ready.',
+    b0:'Start installation',
+    t1:'Domain and SSL',
+    s1:'With a domain the panel runs over secure HTTPS. Without one, skip this step — you can add a domain later.',
+    h1:'Domain', h1b:'Email (for certificate renewal notices)',
+    nextDomain:'Check domain and continue', skipDomain:'No domain, continue with the IP',
+    dChecking:'Checking DNS…',
+    dBad:'That does not look like a domain. For example: bot.example.com',
+    dOk:'The domain points to this server.',
+    dMiss:'The domain points to %1 but this server is %2. You can continue, but no SSL certificate will be issued.',
+    dGo:'Continue anyway',
+    t2:'Connect Telegram',
+    s2:'Paste the bot token you received from BotFather.',
+    h2:'Bot token',
+    i2:'Message <a href="https://t.me/BotFather" target="_blank">@BotFather</a> on Telegram, send /newbot and copy the token.',
+    nextToken:'Verify token and continue',
+    tChecking:'Verifying token…',
+    tEmpty:'Enter the bot token.',
+    tOk:'Token is valid — %1',
+    tBad:'Telegram rejected that token. Copy it again from BotFather.',
+    t3:'Admin account',
+    s3:'This account signs in to the admin panel and recovers the password.',
+    h3:'Telegram numeric ID',
+    i3:'Message <a href="https://t.me/userinfobot" target="_blank">@userinfobot</a> — the number it replies with is your ID.',
+    h3b:'Panel password', h3c:'Repeat password',
+    startInstall:'Start installation',
+    aId:'Enter your Telegram numeric ID (digits only).',
+    aLen:'The password must be at least 8 characters.',
+    aAscii:'Use only Latin letters, digits and symbols for the password.',
+    aMatch:'The two passwords do not match.',
+    t4:'Installing',
+    s4:'This usually takes 3 to 8 minutes. Please keep this page open.',
+    showLog:'Show technical details', hideLog:'Hide details',
+    failed:'Installation stopped', retry:'Try again',
+    t5:'Installation complete',
+    s5:'Save these details now — they will not be shown again once you close this page.',
+    kUrl:'Panel URL', kUser:'Username', kPass:'Password',
+    goPanel:'Go to the admin panel',
+    f5:'To manage it later, just run <code>shopbot</code> on the server.',
+    sslWarn:'The SSL certificate could not be issued, but the install finished. Run shopbot and pick option 11 to retry.',
+    resume:'An unfinished installation was found. Resume it or start over?',
+    btnResume:'Resume install', btnFresh:'Start over',
+    copied:'Copied', netErr:'Lost connection to the server. Please refresh the page.',
+    foot:'ShopBot installer'
+  }
+};
 
-// ---------- i18n ----------
-var lang='fa', step=0, cfg={}, installing=false;
-var STEP_LABELS_FA={packages:'بسته‌های سیستمی',nodejs:'Node.js',user:'کاربر سیستمی',files:'کپی فایل‌ها',env:'تنظیمات محیطی',venv:'محیط پایتون',panel:'ساخت پنل',nginx:'Nginx و سرویس‌ها',firewall:'فایروال',ssl:'گواهی SSL',launch:'اجرای سرویس‌ها'};
-
-var T={fa:{
- 'tagline':'نصب‌کننده خودکار و ویزارد راه‌اندازی',
- 'w-h':'خوش آمدید','w-p':'این ویزارد ShopBot را به‌صورت کامل روی سرور شما نصب می‌کند. هر مرحله ذخیره می‌شود؛ اگر خطایی رخ دهد، نصب از همان‌جا ادامه پیدا می‌کند و از اول شروع نمی‌شود.',
- 'f1':'ربات فروشگاهی تلگرام','f2':'پنل مدیریت React','f3':'پرداخت کارت، USDT، TON، زرین‌پال','f4':'Nginx، systemd، فایروال و SSL رایگان','w-b':'شروع نصب',
- 's1-h':'توکن ربات','s1-p':'در تلگرام به @BotFather پیام دهید، ربات بسازید و توکن را اینجا بگذارید.','s1-l':'توکن ربات','s1-hint':'دستور /newbot را برای @BotFather بفرستید.',
- 'b-back1':'بازگشت','b-next1':'بررسی و ادامه',
- 's2-h':'حساب مدیر','s2-p':'شناسه عددی تلگرام شما مالک ربات می‌شود.','s2-l':'شناسه عددی تلگرام','s2-hint':'از @userinfobot بگیرید.','b-back2':'بازگشت','b-next2':'بعدی',
- 's3-h':'دامنه و پنل','s3-p':'قبل از ادامه، رکورد A دامنه را به IP همین سرور وصل کنید.','s3-l1':'دامنه یا IP سرور','s3-l2':'رمز عبور پنل مدیریت','s3-ssl':'دریافت SSL رایگان (Let\u0027s Encrypt)',
- 'ssl-note':'اگر گرفتن SSL شکست بخورد، نصب‌کننده خودش تنظیمات سالم HTTP را برمی‌گرداند و می‌توانید فقط SSL را دوباره تلاش کنید.',
- 'b-back3':'بازگشت','b-next3':'بعدی',
- 's4-h':'روش‌های پرداخت','s4-p':'روش‌های دلخواه را فعال کنید. بعداً هم قابل تغییر است.','b-back4':'بازگشت','b-next4':'بعدی',
- 's5-h':'کلیدهای API','s5-p':'اختیاری است. می‌توانید خالی بگذارید و بعداً از پنل وارد کنید.','b-back5':'بازگشت','b-next5':'بعدی',
- 's6-h':'مرور نهایی','s6-p':'همه‌چیز را بررسی کنید و نصب را شروع کنید.','b-back6':'بازگشت','b-install':'شروع نصب',
- 's7-h':'در حال نصب','s7-p':'این صفحه را باز نگه دارید. هر مرحله ذخیره می‌شود؛ خطا باعث شروع مجدد کل نصب نمی‌شود.',
- 's8-h':'نصب با موفقیت کامل شد','b-open':'باز کردن پنل مدیریت',
- 'e-token':'توکن نامعتبر است','e-admin':'شناسه عددی معتبر وارد کنید','e-domain':'دامنه یا IP را وارد کنید','e-pass':'رمز باید حداقل ۸ کاراکتر باشد',
- 'rv-bot':'ربات','rv-admin':'شناسه مدیر','rv-domain':'دامنه','rv-pass':'رمز پنل','rv-ssl':'SSL','rv-pay':'روش‌های پرداخت','yes':'بله','no':'خیر',
- 'fix-title':'چطور این مشکل را حل کنم؟','detail':'جزئیات فنی','resume':'ادامه از همین مرحله','retry-step':'تلاش دوباره این مرحله','retry-ssl':'فقط SSL را دوباره بگیر','clean':'نصب کامل از اول','skip-note':'مراحل انجام‌شده دوباره اجرا نمی‌شوند.',
- 'resume-found':'یک نصب ناتمام پیدا شد. می‌توانید از همان‌جا ادامه دهید.','resume-btn':'ادامه نصب قبلی',
- 'dns-ok':'✅ دامنه به این سرور اشاره می‌کند','dns-bad':'⚠️ دامنه به این سرور اشاره نمی‌کند','dns-none':'⚠️ دامنه قابل resolve نیست — رکورد A را بسازید','checking':'در حال بررسی...',
- 'panel-url':'آدرس پنل','panel-pass2':'رمز پنل','ssl-state':'وضعیت SSL','ssl-on':'فعال','ssl-off':'غیرفعال (HTTP)'
-},en:{
- 'tagline':'Automated installer and setup wizard',
- 'w-h':'Welcome','w-p':'This wizard installs ShopBot end to end. Every step is checkpointed, so if something fails the installer resumes from that step instead of starting over.',
- 'f1':'Telegram shop bot','f2':'React admin panel','f3':'Card, USDT, TON, Zarinpal payments','f4':'Nginx, systemd, firewall and free SSL','w-b':'Start',
- 's1-h':'Bot token','s1-p':'Create a bot with @BotFather on Telegram and paste its token here.','s1-l':'Bot Token','s1-hint':'Send /newbot to @BotFather.',
- 'b-back1':'Back','b-next1':'Verify and continue',
- 's2-h':'Admin account','s2-p':'Your numeric Telegram ID becomes the bot owner.','s2-l':'Telegram numeric ID','s2-hint':'Get it from @userinfobot.','b-back2':'Back','b-next2':'Next',
- 's3-h':'Domain and panel','s3-p':'Point the A record of your domain to this server first.','s3-l1':'Domain or server IP','s3-l2':'Admin panel password','s3-ssl':'Install free SSL (Let\u0027s Encrypt)',
- 'ssl-note':'If SSL fails, the installer restores a working HTTP site automatically and lets you retry SSL on its own.',
- 'b-back3':'Back','b-next3':'Next',
- 's4-h':'Payment methods','s4-p':'Enable the methods you want. You can change them later.','b-back4':'Back','b-next4':'Next',
- 's5-h':'API keys','s5-p':'Optional. Leave empty and add them later from the panel.','b-back5':'Back','b-next5':'Next',
- 's6-h':'Review','s6-p':'Check everything, then start the installation.','b-back6':'Back','b-install':'Install now',
- 's7-h':'Installing','s7-p':'Keep this page open. Each step is saved, so a failure never restarts the whole install.',
- 's8-h':'Installation complete','b-open':'Open admin panel',
- 'e-token':'Invalid token','e-admin':'Enter a valid numeric ID','e-domain':'Enter a domain or IP','e-pass':'Password must be at least 8 characters',
- 'rv-bot':'Bot','rv-admin':'Admin ID','rv-domain':'Domain','rv-pass':'Panel password','rv-ssl':'SSL','rv-pay':'Payment methods','yes':'Yes','no':'No',
- 'fix-title':'How to fix this','detail':'Technical detail','resume':'Resume from this step','retry-step':'Retry this step','retry-ssl':'Retry SSL only','clean':'Full clean reinstall','skip-note':'Completed steps are not re-run.',
- 'resume-found':'An unfinished installation was found. You can continue from where it stopped.','resume-btn':'Resume previous install',
- 'dns-ok':'DNS OK - the domain points to this server','dns-bad':'The domain does not point to this server','dns-none':'Domain cannot be resolved - create an A record','checking':'Checking...',
- 'panel-url':'Panel URL','panel-pass2':'Panel password','ssl-state':'SSL status','ssl-on':'Active','ssl-off':'Disabled (HTTP)'
-}};
-
-function t(k){return (T[lang]&&T[lang][k])||(T.en[k])||k}
-function setLang(L){
-  lang=L;
-  document.documentElement.lang=L;
-  document.documentElement.dir=(L==='fa')?'rtl':'ltr';
-  document.getElementById('lang-btn').textContent=(L==='fa')?'EN':'FA';
-  var keys=Object.keys(T[L]);
-  for(var i=0;i<keys.length;i++){var el=document.getElementById(keys[i]);if(el)el.textContent=T[L][keys[i]]}
-  renderSteps();
-  if(step===6)renderReview();
+var lang = 'fa';
+function L(k){ return T[lang][k] || k; }
+function fmt(s){
+  var a = arguments;
+  return String(s).replace(/%(\d)/g, function(m, i){ return a[+i] == null ? m : a[+i]; });
+}
+var FA_D = ['۰','۱','۲','۳','۴','۵','۶','۷','۸','۹'];
+function num(n){
+  if (lang !== 'fa') return String(n);
+  return String(n).replace(/\d/g, function(d){ return FA_D[+d]; });
 }
 
-// ---------- stepper ----------
-var TOTAL=7;
-function renderStepper(){
-  var h='';
-  for(var i=0;i<TOTAL;i++){
-    var cl=(i<step)?'dot ok':(i===step?'dot on':'dot');
-    h+='<div class="'+cl+'">'+(i<step?'&#10003;':(i+1))+'</div>';
-    if(i<TOTAL-1)h+='<div class="bar'+(i<step?' done':'')+'"><i></i></div>';
+/* ------------------------------------------------------------------ utils */
+function $(id){ return document.getElementById(id); }
+function esc(s){
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+var ICON = {
+  err:  '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>',
+  ok:   '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg>',
+  warn: '<svg viewBox="0 0 24 24"><path d="M10.3 3.9 2.4 17.1A1.9 1.9 0 0 0 4 20h16a1.9 1.9 0 0 0 1.6-2.9L13.7 3.9a1.9 1.9 0 0 0-3.4 0Z"/><path d="M12 9v4M12 16h.01"/></svg>',
+  info: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>'
+};
+function alertHTML(kind, msg){
+  return '<div class="alert ' + kind + '">' + ICON[kind] + '<div>' + msg + '</div></div>';
+}
+function setMsg(id, kind, msg){
+  $(id).innerHTML = msg ? alertHTML(kind, msg) : '';
+}
+function post(url, data){
+  return fetch(url, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(data || {})
+  }).then(function(r){ return r.json(); });
+}
+function get(url){ return fetch(url).then(function(r){ return r.json(); }); }
+
+/* ------------------------------------------------------------------ state */
+var TOTAL = 6;
+var NAMES = ['n0','n1','n2','n3','n4','n5'];
+var cur = 0, serverIp = '', botName = '', installing = false, finished = false;
+
+function buildStepper(){
+  var h = '';
+  for (var i = 0; i < TOTAL; i++) h += '<div class="dot" data-d="' + i + '"></div>';
+  $('stepper').innerHTML = h;
+}
+function paintStepper(){
+  var dots = document.querySelectorAll('.dot');
+  for (var i = 0; i < dots.length; i++){
+    dots[i].className = 'dot' + (i < cur ? ' done' : (i === cur ? ' on' : ''));
   }
-  document.getElementById('stepper').innerHTML=h;
+  $('stepNow').textContent = fmt(L('stepOf'), num(cur + 1), num(TOTAL));
+  $('stepName').textContent = L(NAMES[cur]);
 }
 function go(n){
-  var cur=document.querySelector('.pane.on'); if(cur)cur.classList.remove('on');
-  step=n;
-  document.getElementById('p'+n).classList.add('on');
-  document.getElementById('stepper').style.display=(n>=7)?'none':'flex';
-  renderStepper();
-  window.scrollTo({top:0,behavior:'smooth'});
-}
-function showErr(id,msg){var e=document.getElementById(id);e.textContent=msg;e.classList.add('show')}
-function clrErr(id){document.getElementById(id).classList.remove('show')}
-
-// ---------- api ----------
-function api(url,data){
-  return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data||{})}).then(function(r){return r.json()});
-}
-
-// ---------- step 1 ----------
-function checkToken(){
-  var el=document.getElementById('bot-token'), v=el.value.trim(), b=document.getElementById('b-next1');
-  clrErr('e-token'); el.classList.remove('bad','good');
-  if(!v){el.classList.add('bad');showErr('e-token',t('e-token'));return}
-  b.disabled=true; b.innerHTML='<span class="spin"></span>';
-  api('/api/validate-token',{token:v}).then(function(r){
-    b.disabled=false; b.textContent=t('b-next1');
-    if(r.ok){
-      el.classList.add('good'); cfg.bot_token=v; cfg.bot_username=r.info.username;
-      api('/api/save',{bot_token:v}); go(2);
-    }else{ el.classList.add('bad'); showErr('e-token',(typeof r.info==='string')?r.info:t('e-token')); }
-  }).catch(function(){b.disabled=false;b.textContent=t('b-next1');showErr('e-token','Network error')});
-}
-
-// ---------- step 2 ----------
-function saveAdmin(){
-  var el=document.getElementById('admin-id'), v=el.value.trim();
-  clrErr('e-admin'); el.classList.remove('bad','good');
-  if(!/^[0-9]{5,}$/.test(v)){el.classList.add('bad');showErr('e-admin',t('e-admin'));return}
-  el.classList.add('good'); cfg.admin_id=v; api('/api/save',{admin_id:v}); go(3);
-}
-
-// ---------- step 3 ----------
-var dnsTimer=null;
-function toggleSsl(fromInput){
-  var c=document.getElementById('ssl-check');
-  if(!fromInput)c.checked=!c.checked;
-  document.getElementById('ssl-wrap').classList.toggle('sel',c.checked);
-}
-document.addEventListener('input',function(e){
-  if(e.target.id!=='domain')return;
-  clearTimeout(dnsTimer);
-  var v=e.target.value.trim();
-  var s=document.getElementById('dns-status');
-  if(!v||/^[0-9.]+$/.test(v)){s.textContent='';return}
-  s.textContent=t('checking');
-  dnsTimer=setTimeout(function(){
-    api('/api/check-domain',{domain:v}).then(function(r){
-      if(r.ok)s.innerHTML='<span style="color:#34d399">'+t('dns-ok')+'</span>';
-      else if(!r.resolved)s.innerHTML='<span style="color:#fbbf24">'+t('dns-none')+'</span>';
-      else s.innerHTML='<span style="color:#fbbf24">'+t('dns-bad')+' ('+r.resolved+' &ne; '+r.server_ip+')</span>';
-    }).catch(function(){s.textContent=''});
-  },700);
-});
-function saveDomain(){
-  var d=document.getElementById('domain'), p=document.getElementById('panel-pass');
-  var dv=d.value.trim(), pv=p.value;
-  clrErr('e-domain'); clrErr('e-pass'); d.classList.remove('bad'); p.classList.remove('bad');
-  var bad=false;
-  if(!dv){d.classList.add('bad');showErr('e-domain',t('e-domain'));bad=true}
-  if(pv.length<8){p.classList.add('bad');showErr('e-pass',t('e-pass'));bad=true}
-  if(bad)return;
-  cfg.domain=dv; cfg.panel_password=pv; cfg.ssl=document.getElementById('ssl-check').checked;
-  api('/api/save',{domain:dv,panel_password:pv,ssl:cfg.ssl}); go(4);
-}
-
-// ---------- step 4 ----------
-function togglePay(k,row){
-  var c=document.getElementById('pay-'+k);
-  c.checked=!c.checked;
-  row.classList.toggle('sel',c.checked);
-}
-function savePays(){
-  var ks=['card','bep20','trc20','ton','zarinpal'];
-  for(var i=0;i<ks.length;i++)cfg['pay_'+ks[i]]=document.getElementById('pay-'+ks[i]).checked;
-  buildKeys(); go(5);
-}
-function keyField(id,label,hint){
-  return '<div class="field"><label>'+label+'</label><input type="text" id="'+id+'" autocomplete="off">'+
-         '<div class="hint">'+hint+'</div></div>';
-}
-function buildKeys(){
-  var h='';
-  if(cfg.pay_bep20)h+=keyField('bscscan-key','BscScan API Key',lang==='fa'?'برای بررسی تراکنش‌های USDT BEP20':'For USDT BEP20 transaction checks');
-  if(cfg.pay_zarinpal)h+=keyField('zarinpal-id','Zarinpal Merchant ID',lang==='fa'?'از داشبورد زرین‌پال':'From the Zarinpal dashboard');
-  h+=keyField('navasan-key',lang==='fa'?'کلید API نرخ دلار (navasan.tech)':'USD rate API key (navasan.tech)',lang==='fa'?'اختیاری — برای تبدیل نرخ ارز':'Optional - used for currency conversion');
-  document.getElementById('api-fields').innerHTML=h;
-}
-function saveKeys(){
-  var map={'bscscan-key':'bscscan_key','zarinpal-id':'zarinpal_id','navasan-key':'navasan_key'};
-  for(var id in map){var el=document.getElementById(id);if(el)cfg[map[id]]=el.value.trim()}
-  api('/api/save',cfg); renderReview(); go(6);
-}
-
-// ---------- step 6 ----------
-function renderReview(){
-  var pays=['card','bep20','trc20','ton','zarinpal'].filter(function(k){return cfg['pay_'+k]});
-  var rows=[
-    [t('rv-bot'), cfg.bot_username?('@'+cfg.bot_username):'-'],
-    [t('rv-admin'), cfg.admin_id||'-'],
-    [t('rv-domain'), cfg.domain||'-'],
-    [t('rv-pass'), '••••••••'],
-    [t('rv-ssl'), cfg.ssl?'<span class="badge b-g">'+t('yes')+'</span>':'<span class="badge b-r">'+t('no')+'</span>'],
-    [t('rv-pay'), pays.join(', ')||'-']
-  ];
-  var h='';
-  for(var i=0;i<rows.length;i++)h+='<tr><td>'+rows[i][0]+'</td><td>'+rows[i][1]+'</td></tr>';
-  document.getElementById('review').innerHTML=h;
-}
-
-// ---------- install ----------
-function startInstall(){ api('/api/install',cfg).then(function(){beginStream()}); go(7); }
-function resumeInstall(){ document.getElementById('errbox').innerHTML=''; api('/api/resume',{}).then(function(){beginStream()}); go(7); }
-function retryStep(k){ document.getElementById('errbox').innerHTML=''; api('/api/retry-step',{step:k}).then(function(){beginStream()}); }
-function retrySsl(){ document.getElementById('errbox').innerHTML=''; api('/api/retry-ssl',{}).then(function(){beginStream()}); }
-function cleanInstall(){ document.getElementById('errbox').innerHTML=''; document.getElementById('console').innerHTML=''; api('/api/restart-clean',{}).then(function(){beginStream()}); }
-
-function renderSteps(list){
-  if(list)window._steps=list;
-  var arr=window._steps||[]; var h='';
-  for(var i=0;i<arr.length;i++){
-    var s=arr[i];
-    var icon='<span style="opacity:.35">&#9675;</span>', col='var(--mut)';
-    if(s.status==='done'){icon='<span style="color:#34d399">&#10003;</span>';col='#9aa0b8'}
-    else if(s.status==='running'){icon='<span class="spin" style="border-top-color:#818cf8"></span>';col='#c7d2fe'}
-    else if(s.status==='failed'){icon='<span style="color:#f87171">&#10007;</span>';col='#fca5a5'}
-    var label=(lang==='fa'&&STEP_LABELS_FA[s.key])?STEP_LABELS_FA[s.key]:s.title;
-    h+='<div style="display:flex;align-items:center;gap:.55rem;font-size:.79rem;color:'+col+';padding:.16rem 0">'+icon+'<span>'+label+'</span></div>';
+  cur = n;
+  var panes = document.querySelectorAll('.pane');
+  for (var i = 0; i < panes.length; i++){
+    panes[i].classList.toggle('on', +panes[i].dataset.p === n);
   }
-  document.getElementById('steplist').innerHTML=h;
+  paintStepper();
+  $('alertBox').innerHTML = '';
+  window.scrollTo(0, 0);
 }
 
-function addLine(msg){
-  var c=document.getElementById('console');
-  var col='#9aa4bf';
-  if(msg.indexOf('[OK]')===0||msg.indexOf('successfully')>-1)col='#34d399';
-  else if(msg.indexOf('[FAILED]')===0)col='#f87171';
-  else if(msg.indexOf('[WARN]')===0)col='#fbbf24';
-  else if(msg.indexOf('====')===0)col='#818cf8';
-  else if(msg.indexOf('$ ')===0)col='#64748b';
-  else if(msg.indexOf('  Fix ')===0)col='#fbbf24';
-  var d=document.createElement('div');
-  d.style.color=col; d.style.animation='fadeUp .2s';
-  d.textContent=msg;
-  c.appendChild(d); c.scrollTop=c.scrollHeight;
-}
-
-function showError(err){
-  var sols='';
-  for(var i=0;i<(err.solutions||[]).length;i++){
-    sols+='<div style="display:flex;gap:.5rem;padding:.3rem 0;font-size:.8rem;line-height:1.8">'+
-      '<span style="color:#fbbf24;font-weight:700;flex-shrink:0">'+(i+1)+'.</span>'+
-      '<span style="direction:ltr;text-align:left;font-family:\'JetBrains Mono\',monospace;font-size:.74rem;color:#e5e7eb">'+
-      String(err.solutions[i]).replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</span></div>';
+function applyLang(){
+  document.documentElement.lang = lang;
+  document.documentElement.dir = (lang === 'fa') ? 'rtl' : 'ltr';
+  $('langTxt').textContent = (lang === 'fa') ? 'EN' : 'FA';
+  var keys = ['bTitle','bSub','t0','s0','b0','t1','s1','h1','h1b','nextDomain','skipDomain',
+              't2','s2','h2','i2','nextToken','t3','s3','h3','i3','h3b','h3c','startInstall',
+              't4','s4','t5','s5','goPanel','f5'];
+  for (var i = 0; i < keys.length; i++){
+    var el = $(keys[i]);
+    if (el) el.innerHTML = L(keys[i]);
   }
-  var extra='';
-  if(err.step==='ssl')extra='<button class="btn sec" onclick="retrySsl()">'+t('retry-ssl')+'</button>';
-  document.getElementById('errbox').innerHTML=
-    '<div style="margin-top:1rem;background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.32);'+
-    'border-radius:14px;padding:1.1rem;animation:slideUp .45s">'+
-    '<div style="font-weight:700;color:#f87171;margin-bottom:.5rem;font-size:.92rem">&#10007; '+
-      String(err.title).replace(/</g,'&lt;')+'</div>'+
-    (err.detail?('<div style="font-size:.71rem;color:#94a3b8;direction:ltr;text-align:left;background:#05060c;'+
-      'border-radius:8px;padding:.6rem;margin-bottom:.8rem;max-height:110px;overflow:auto;'+
-      'font-family:\'JetBrains Mono\',monospace;white-space:pre-wrap">'+String(err.detail).replace(/</g,'&lt;')+'</div>'):'')+
-    '<div style="font-weight:700;color:#fbbf24;margin:.5rem 0 .2rem;font-size:.85rem">&#128161; '+t('fix-title')+'</div>'+
-    sols+
-    '<div style="font-size:.73rem;color:var(--mut);margin-top:.7rem">'+t('skip-note')+'</div>'+
-    '<div class="row" style="margin-top:.9rem">'+
-      '<button class="btn pri" onclick="resumeInstall()">'+t('resume')+'</button>'+
-      extra+
-      '<button class="btn ghost" onclick="cleanInstall()">'+t('clean')+'</button>'+
-    '</div></div>';
+  $('toggleLog').textContent = $('term').classList.contains('on') ? L('hideLog') : L('showLog');
+  $('pageFoot').textContent = L('foot');
+  paintStepper();
+  renderResume();
 }
 
-var es=null;
-function beginStream(){
-  if(es){es.close();es=null}
-  es=new EventSource('/api/logs/stream');
-  es.onmessage=function(ev){
-    var d=JSON.parse(ev.data);
-    if(d.steps)renderSteps(d.steps);
-    if(typeof d.progress==='number'){
-      document.getElementById('pbar').style.width=d.progress+'%';
-      document.getElementById('pct').textContent=d.progress+'%';
-    }
-    if(d.steps){
-      var run=d.steps.filter(function(s){return s.status==='running'})[0];
-      if(run)document.getElementById('cur-step').textContent=(lang==='fa'&&STEP_LABELS_FA[run.key])?STEP_LABELS_FA[run.key]:run.title;
-    }
-    if(d.msg==='__DONE__'){
-      es.close(); es=null;
-      if(d.error){ showError(d.error); }
-      else{ finish(); }
-      return;
-    }
-    if(d.msg!=='')addLine(d.msg);
+$('langBtn').onclick = function(){
+  lang = (lang === 'fa') ? 'en' : 'fa';
+  applyLang();
+};
+
+/* eye toggles */
+var eyes = document.querySelectorAll('.eye');
+for (var e = 0; e < eyes.length; e++){
+  eyes[e].onclick = function(){
+    var f = $(this.dataset.for);
+    f.type = (f.type === 'password') ? 'text' : 'password';
   };
-  es.onerror=function(){ if(es){es.close();es=null;setTimeout(beginStream,1500)} };
 }
 
-function finish(){
-  fetch('/api/state').then(function(r){return r.json()}).then(function(s){
-    var url=s.panel_url||('http://'+(cfg.domain||'localhost'));
-    var secure=url.indexOf('https')===0;
-    window._panel=url;
-    document.getElementById('final').innerHTML=
-      '<tr><td>'+t('panel-url')+'</td><td><a href="'+url+'" target="_blank" style="color:#818cf8">'+url+'</a></td></tr>'+
-      '<tr><td>'+t('panel-pass2')+'</td><td style="font-family:monospace">'+(s.panel_password||'')+'</td></tr>'+
-      '<tr><td>'+t('rv-bot')+'</td><td>'+(cfg.bot_username?('@'+cfg.bot_username):'-')+'</td></tr>'+
-      '<tr><td>'+t('ssl-state')+'</td><td>'+(secure?'<span class="badge b-g">'+t('ssl-on')+'</span>':'<span class="badge b-y">'+t('ssl-off')+'</span>')+'</td></tr>';
-    go(8);
+/* ------------------------------------------------------------- 0 welcome */
+var resumeAvailable = false;
+function renderResume(){
+  if (!resumeAvailable){ $('resumeBox').innerHTML = ''; return; }
+  $('resumeBox').innerHTML =
+    alertHTML('info', L('resume')) +
+    '<div class="row" style="margin-bottom:14px">' +
+      '<button class="btn btn-primary" id="btnResume">' + L('btnResume') + '</button>' +
+      '<button class="btn btn-secondary" id="btnFresh">' + L('btnFresh') + '</button>' +
+    '</div>';
+  $('btnResume').onclick = function(){ beginInstall('/api/resume', {}); };
+  $('btnFresh').onclick = function(){
+    resumeAvailable = false;
+    renderResume();
+  };
+}
+$('b0').onclick = function(){ go(1); };
+
+/* -------------------------------------------------------------- 1 domain */
+function validDomain(d){
+  return /^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(d);
+}
+$('domain').addEventListener('input', function(){
+  $('emailField').style.display = this.value.trim() ? 'block' : 'none';
+});
+$('skipDomain').onclick = function(){
+  $('domain').value = '';
+  $('email').value = '';
+  setMsg('domainMsg', 'info', '');
+  go(2);
+};
+$('nextDomain').onclick = function(){
+  var d = $('domain').value.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  if (!d){ go(2); return; }
+  if (!validDomain(d)){ setMsg('domainMsg', 'err', L('dBad')); return; }
+  $('domain').value = d;
+  var btn = this;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span>' + L('dChecking');
+  post('/api/check-domain', { domain: d }).then(function(r){
+    btn.disabled = false;
+    btn.textContent = L('nextDomain');
+    if (r.ok){
+      setMsg('domainMsg', 'ok', L('dOk'));
+      setTimeout(function(){ go(2); }, 650);
+    } else {
+      $('domainMsg').innerHTML =
+        alertHTML('warn', fmt(L('dMiss'), esc(r.resolved || '?'), esc(r.server_ip || serverIp))) +
+        '<button class="btn btn-secondary" id="dGo" style="margin-bottom:14px">' + L('dGo') + '</button>';
+      $('dGo').onclick = function(){ go(2); };
+    }
+  })['catch'](function(){
+    btn.disabled = false;
+    btn.textContent = L('nextDomain');
+    setMsg('domainMsg', 'err', L('netErr'));
+  });
+};
+
+/* ------------------------------------------------------------ 2 telegram */
+$('nextToken').onclick = function(){
+  var tok = $('token').value.trim();
+  if (!tok){ setMsg('tokenMsg', 'err', L('tEmpty')); return; }
+  var btn = this;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span>' + L('tChecking');
+  post('/api/validate-token', { token: tok }).then(function(r){
+    btn.disabled = false;
+    btn.textContent = L('nextToken');
+    if (r.ok){
+      botName = r.info || '';
+      setMsg('tokenMsg', 'ok', fmt(L('tOk'), esc(botName)));
+      setTimeout(function(){ go(3); }, 650);
+    } else {
+      setMsg('tokenMsg', 'err', esc(r.info || L('tBad')));
+    }
+  })['catch'](function(){
+    btn.disabled = false;
+    btn.textContent = L('nextToken');
+    setMsg('tokenMsg', 'err', L('netErr'));
+  });
+};
+
+/* --------------------------------------------------------------- 3 admin */
+$('startInstall').onclick = function(){
+  var id = $('adminId').value.trim();
+  var p1 = $('pass').value;
+  var p2 = $('pass2').value;
+
+  if (!/^\d{5,}$/.test(id)){ setMsg('adminMsg', 'err', L('aId')); return; }
+  if (p1.length < 8){ setMsg('adminMsg', 'err', L('aLen')); return; }
+  // The panel compares this password with secrets.compare_digest, which only
+  // accepts ASCII. A Persian password would make every login fail with a 500.
+  if (!/^[\x21-\x7E]+$/.test(p1)){ setMsg('adminMsg', 'err', L('aAscii')); return; }
+  if (p1 !== p2){ setMsg('adminMsg', 'err', L('aMatch')); return; }
+
+  setMsg('adminMsg', 'info', '');
+  beginInstall('/api/install', {
+    lang: lang,
+    domain: $('domain').value.trim(),
+    email: $('email').value.trim(),
+    bot_token: $('token').value.trim(),
+    admin_id: id,
+    panel_password: p1
+  });
+};
+
+/* ------------------------------------------------------------- 4 install */
+var TASK_ICON = {
+  pending: '<span class="pend"></span>',
+  running: '<span class="spin" style="width:14px;height:14px"></span>',
+  done:    '<svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7"/></svg>',
+  failed:  '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+  skipped: '<svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg>'
+};
+var CLS = { running:'run', done:'done', failed:'fail', skipped:'done' };
+
+function paintTasks(steps){
+  if (!steps || !steps.length) return;
+  var h = '';
+  for (var i = 0; i < steps.length; i++){
+    var s = steps[i];
+    var st = s.status || 'pending';
+    h += '<li class="' + (CLS[st] || '') + '">' +
+           '<span class="tico">' + (TASK_ICON[st] || TASK_ICON.pending) + '</span>' +
+           '<span>' + esc(s.title || s.key) + '</span>' +
+         '</li>';
+    if (st === 'running') $('barLabel').textContent = s.title || s.key;
+  }
+  $('tasks').innerHTML = h;
+}
+function setProgress(p){
+  p = Math.max(0, Math.min(100, Math.round(p || 0)));
+  $('barFill').style.width = p + '%';
+  $('barPct').textContent = num(p) + '%';
+}
+function logLine(msg){
+  var cls = '';
+  var low = String(msg).toLowerCase();
+  if (/error|failed|fatal|traceback/.test(low)) cls = 'l-err';
+  else if (/warn/.test(low)) cls = 'l-warn';
+  else if (/^ok|done|success|\u2713/.test(low)) cls = 'l-ok';
+  var d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.textContent = msg;
+  var t = $('term');
+  t.appendChild(d);
+  t.scrollTop = t.scrollHeight;
+}
+$('toggleLog').onclick = function(){
+  var on = $('term').classList.toggle('on');
+  this.textContent = on ? L('hideLog') : L('showLog');
+};
+
+function beginInstall(url, payload){
+  installing = true;
+  $('installActions').innerHTML = '';
+  setMsg('installMsg', 'info', '');
+  go(4);
+  post(url, payload).then(function(){ streamLogs(); })['catch'](function(){
+    setMsg('installMsg', 'err', L('netErr'));
   });
 }
-function openPanel(){ window.open(window._panel||'/','_blank') }
 
-// ---------- boot ----------
-fetch('/api/server-info').then(function(r){return r.json()}).then(function(d){
-  if(d.resume_available){
-    document.getElementById('resume-box').innerHTML=
-      '<div style="background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.32);border-radius:12px;'+
-      'padding:.9rem;margin-bottom:1rem;font-size:.82rem;animation:slideUp .5s">'+
-      '<div style="color:#fbbf24;font-weight:600;margin-bottom:.6rem">&#9888; '+t('resume-found')+'</div>'+
-      '<button class="btn sec" style="width:100%" onclick="resumeInstall()">'+t('resume-btn')+'</button></div>';
+function streamLogs(){
+  var es = new EventSource('/api/logs/stream');
+  es.onmessage = function(ev){
+    var d;
+    try { d = JSON.parse(ev.data); } catch (x){ return; }
+    if (d.msg === '__DONE__'){
+      es.close();
+      installing = false;
+      setProgress(d.progress);
+      paintTasks(d.steps);
+      if (d.error) onFailed(d.error); else onDone();
+      return;
+    }
+    logLine(d.msg);
+    setProgress(d.progress);
+    paintTasks(d.steps);
+  };
+  es.onerror = function(){
+    es.close();
+    if (installing) setTimeout(streamLogs, 1500);
+  };
+}
+
+function onFailed(err){
+  var detail = (typeof err === 'string') ? err : (err && err.detail) || '';
+  var title  = (err && err.title) || L('failed');
+  var sols   = (err && err.solutions) || [];
+  var h = '<b>' + esc(title) + '</b>';
+  if (detail) h += '<br>' + esc(detail);
+  if (sols.length){
+    h += '<br><br>';
+    for (var i = 0; i < sols.length; i++) h += '• ' + esc(sols[i]) + '<br>';
   }
-}).catch(function(){});
-setLang('fa');
-renderStepper();
+  $('installMsg').innerHTML = alertHTML('err', h);
+  $('term').classList.add('on');
+  $('toggleLog').textContent = L('hideLog');
+  $('installActions').innerHTML =
+    '<button class="btn btn-primary" id="btnRetry">' + L('retry') + '</button>';
+  $('btnRetry').onclick = function(){
+    $('installMsg').innerHTML = '';
+    $('installActions').innerHTML = '';
+    beginInstall('/api/resume', {});
+  };
+}
+
+function onDone(){
+  finished = true;
+  get('/api/state').then(function(st){ showFinish(st); })['catch'](function(){ showFinish({}); });
+}
+
+function copyBtn(val){
+  return '<button class="cp" data-c="' + esc(val) + '">' +
+         '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/>' +
+         '<path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>';
+}
+
+function showFinish(st){
+  var url = st.panel_url || ('http://' + (serverIp || location.hostname));
+  var pass = $('pass').value || '';
+  var warns = st.warnings || [];
+  var sslFailed = false;
+  for (var i = 0; i < warns.length; i++){
+    if (/ssl|certbot|certificate/i.test(String(warns[i]))) sslFailed = true;
+  }
+  $('w5').innerHTML = sslFailed ? alertHTML('warn', L('sslWarn')) : '';
+
+  var rows = [['kUrl', url], ['kUser', 'admin'], ['kPass', pass]];
+  var h = '';
+  for (var j = 0; j < rows.length; j++){
+    if (!rows[j][1]) continue;
+    h += '<div class="r"><span class="k">' + L(rows[j][0]) + '</span>' +
+         '<span class="v">' + esc(rows[j][1]) + '</span>' + copyBtn(rows[j][1]) + '</div>';
+  }
+  $('creds').innerHTML = h;
+
+  var cps = document.querySelectorAll('.cp');
+  for (var k = 0; k < cps.length; k++){
+    cps[k].onclick = function(){
+      var self = this;
+      var txt = self.dataset.c;
+      var done = function(){
+        self.style.color = 'var(--ok)';
+        setTimeout(function(){ self.style.color = ''; }, 1200);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(txt).then(done, function(){});
+      } else {
+        var ta = document.createElement('textarea');
+        ta.value = txt; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); } catch (x){}
+        document.body.removeChild(ta);
+      }
+    };
+  }
+
+  $('goPanel').onclick = function(){
+    window.open(url.replace(/\/$/, '') + '/login', '_blank');
+  };
+  go(5);
+}
+
+/* ----------------------------------------------------------------- boot */
+buildStepper();
+applyLang();
+
+get('/api/server-info').then(function(r){
+  serverIp = r.ip || '';
+  resumeAvailable = !!r.resume_available;
+  renderResume();
+})['catch'](function(){});
+
+/* Rejoin an install that is already running (e.g. the page was reloaded). */
+get('/api/state').then(function(st){
+  if (st && st.running){
+    installing = true;
+    go(4);
+    setProgress(st.progress);
+    paintTasks(st.steps);
+    streamLogs();
+  } else if (st && st.done && !st.error){
+    showFinish(st);
+  }
+})['catch'](function(){});
 </script>
 </body>
 </html>

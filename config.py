@@ -48,11 +48,23 @@ _USD_RATE_API_KEY = _optional_env("USD_RATE_API_KEY", "free")
 # Optional - only used when Zarinpal payment is enabled.
 ZARINPAL_MERCHANT_ID = _optional_env("ZARINPAL_MERCHANT_ID")
 
-ADMIN_IDS = [1663320676]
-SUPPORT_USERNAME = "@akhit77"
+def _int_list_env(name, default):
+    """Parse a comma separated list of Telegram numeric IDs from .env."""
+    raw = _optional_env(name, default)
+    out = []
+    for part in str(raw).replace(" ", "").split(","):
+        if part.lstrip("-").isdigit():
+            out.append(int(part))
+    return out
+
+
+# Deployment specific values. Defaults are kept for backward compatibility
+# with existing installs, but every one of them can be overridden in .env.
+ADMIN_IDS = _int_list_env("ADMIN_IDS", "1663320676")
+SUPPORT_USERNAME = _optional_env("SUPPORT_USERNAME", "@akhit77")
 
 # ---- USDT BEP20 (شبکه BSC) ----
-USDT_WALLET = "0x28fd6fcaDc20844E79c3538341774e991470C1d0".lower()
+USDT_WALLET = _optional_env("USDT_WALLET", "0x28fd6fcaDc20844E79c3538341774e991470C1d0").lower()
 USDT_CONTRACT = "0x55d398326f99059ff775485246999027b3197955"
 BSCSCAN_API = "https://api.bscscan.com/api"
 MIN_DEPOSIT = 1.0

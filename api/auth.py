@@ -28,10 +28,33 @@ import database as db
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "change-me-set-JWT_SECRET-in-env")
+# ── Secrets ──
+# A weak or placeholder JWT_SECRET lets anyone forge an admin token, so the
+# panel refuses to start instead of silently running with a known secret.
+_INSECURE_SECRETS = {
+    "", "change-me-set-JWT_SECRET-in-env", "changeme", "change-me",
+    "secret", "jwt-secret", "your_random_jwt_secret_here",
+}
+
+JWT_SECRET = (os.environ.get("JWT_SECRET") or "").strip()
+if JWT_SECRET.lower() in _INSECURE_SECRETS or len(JWT_SECRET) < 32:
+    sys.exit(
+        "\n[ShopBot] JWT_SECRET is missing, too short, or still set to the "
+        "placeholder value.\n"
+        "The admin panel will not start with a guessable signing key.\n"
+        "How to fix:\n"
+        "  cd /opt/shopbot\n"
+        "  python3 -c 'import secrets;print(\"JWT_SECRET=\"+secrets.token_hex(32))' >> .env\n"
+        "  sudo systemctl restart shopbot-panel\n"
+    )
+
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "24"))
-PANEL_PASSWORD = os.environ.get("PANEL_PASSWORD", "admin123")
+
+# Legacy bootstrap password. Empty by default: an unset PANEL_PASSWORD now
+# disables the legacy login path entirely instead of falling back to
+# "admin123".
+PANEL_PASSWORD = (os.environ.get("PANEL_PASSWORD") or "").strip()
 
 TOTP_ISSUER = os.environ.get("PANEL_2FA_ISSUER", "Shop Bot Panel")
 
@@ -39,8 +62,18 @@ security = HTTPBearer()
 
 
 # ──────── Password hashing ────────
+def _pw_bytes(password: str) -> bytes:
+    """bcrypt only reads the first 72 bytes. Truncating raw UTF-8 can cut a
+    multi-byte character (very common for Persian passwords) in half, so we
+    truncate on a character boundary instead."""
+    raw = (password or "").encode("utf-8")
+    if len(raw) <= 72:
+        return raw
+    return raw[:72].decode("utf-8", "ignore").encode("utf-8")
+
+
 def hash_password(password: str) -> str:
-    hashed = bcrypt.hashpw(password.encode("utf-8")[:72], bcrypt.gensalt(rounds=12))
+    hashed = bcrypt.hashpw(_pw_bytes(password), bcrypt.gensalt(rounds=12))
     return hashed.decode("utf-8")
 
 
@@ -48,7 +81,7 @@ def verify_password(password: str, password_hash: str) -> bool:
     try:
         if not password_hash:
             return False
-        return bcrypt.checkpw(password.encode("utf-8")[:72], password_hash.encode("utf-8"))
+        return bcrypt.checkpw(_pw_bytes(password), password_hash.encode("utf-8"))
     except Exception:
         return False
 
@@ -93,12 +126,29 @@ def verify_totp(secret: str, code: str, window: int = 1, interval: int = 30) -> 
 
 
 # ──────── Simple in-memory rate limiting ────────
+# NOTE: this is per-process. Run the panel with a single uvicorn worker, or
+# move this to Redis, otherwise the effective limit is multiplied by the
+# number of workers.
 _attempts = {}
+_last_prune = 0.0
+_PRUNE_EVERY = 300
+_MAX_TRACKED_KEYS = 10000
+
+
+def _prune(now: float, window: int):
+    """Drop keys that have no recent attempts so the dict cannot grow forever."""
+    global _last_prune
+    if now - _last_prune < _PRUNE_EVERY and len(_attempts) < _MAX_TRACKED_KEYS:
+        return
+    _last_prune = now
+    for k in [k for k, v in _attempts.items() if not v or now - max(v) > window]:
+        _attempts.pop(k, None)
 
 
 def check_rate_limit(key: str, max_attempts: int = 5, window: int = 600) -> bool:
     """Return True if another attempt is allowed for this key."""
     now = time.time()
+    _prune(now, window)
     stamps = [t for t in _attempts.get(key, []) if now - t < window]
     _attempts[key] = stamps
     return len(stamps) < max_attempts

@@ -1,19 +1,136 @@
 import sqlite3
 import json
+import os
 from contextlib import contextmanager
 
-DB = "shop.db"
+# Absolute path. The bot and the panel are two separate systemd services
+# and may start from different working directories; a relative path would
+# silently create and use two unrelated database files.
+DB = os.environ.get("SHOPBOT_DB") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "shop.db")
+
+_wal_enabled = False
+
 
 @contextmanager
-def get_db():
-    conn = sqlite3.connect(DB, timeout=10)  # 10s timeout for lock contention
+def get_db(immediate=False):
+    """Open a database connection.
+
+    immediate=True issues BEGIN IMMEDIATE, taking the write lock up front.
+    Use it for every read-modify-write sequence (balance checks, popping a
+    queue row), otherwise two concurrent callers can both pass the same
+    check before either writes.
+    """
+    global _wal_enabled
+    conn = sqlite3.connect(DB, timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")  # WAL mode for concurrent access
+    if immediate:
+        # Manual transaction control, so our BEGIN is not nested inside an
+        # implicit transaction opened by the sqlite3 driver.
+        conn.isolation_level = None
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA foreign_keys=ON")
+    if not _wal_enabled:
+        conn.execute("PRAGMA journal_mode=WAL")  # persistent; set once per process
+        _wal_enabled = True
+    if immediate:
+        conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
         conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
     finally:
         conn.close()
+
+# Columns that were historically added by migrate_db.py. Installers never ran
+# that script, so the panel crashed with "no such column: panel_username" on
+# every login. init_db() now repairs the schema itself, which makes the panel
+# work on both fresh and upgraded installs without a manual migration step.
+_REQUIRED_COLUMNS = {
+    "admins": [
+        ("panel_username", "TEXT DEFAULT NULL"),
+        ("panel_password_hash", "TEXT DEFAULT NULL"),
+        ("totp_secret", "TEXT DEFAULT ''"),
+        ("totp_pending_secret", "TEXT DEFAULT ''"),
+        ("totp_enabled", "INTEGER DEFAULT 0"),
+        ("reset_code_hash", "TEXT DEFAULT ''"),
+        ("reset_code_expires", "TEXT DEFAULT ''"),
+        ("expires_at", "TEXT DEFAULT NULL"),
+        ("notify_prefs", "TEXT DEFAULT 'all'"),
+    ],
+}
+
+
+def ensure_schema(conn=None):
+    """Add any missing columns in place. Safe to call on every startup."""
+    def _run(c):
+        added = []
+        for table, columns in _REQUIRED_COLUMNS.items():
+            try:
+                existing = {r[1] for r in c.execute(
+                    "PRAGMA table_info(%s)" % table).fetchall()}
+            except Exception:
+                continue
+            if not existing:
+                continue
+            for name, decl in columns:
+                if name not in existing:
+                    try:
+                        c.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, decl))
+                        added.append("%s.%s" % (table, name))
+                    except Exception:
+                        pass
+        return added
+
+    if conn is not None:
+        return _run(conn)
+    with get_db(immediate=True) as c:
+        return _run(c)
+
+
+def seed_admins_from_env(conn=None):
+    """Make sure every ID listed in ADMIN_IDS exists in the admins table.
+
+    On a fresh install nothing had ever inserted these rows, so
+    /api/auth/forgot could not find the owner and silently sent no recovery
+    code. That left the panel permanently unreachable: no login, no reset.
+    """
+    raw = os.environ.get("ADMIN_IDS", "") or ""
+    ids = []
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if part.lstrip("-").isdigit():
+            ids.append(int(part))
+    if not ids:
+        return []
+
+    def _run(c):
+        added = []
+        for uid in ids:
+            try:
+                cur = c.execute(
+                    "INSERT OR IGNORE INTO admins (user_id, is_super, permissions) "
+                    "VALUES (?, 1, 'all')", (uid,))
+                if cur.rowcount:
+                    added.append(uid)
+                else:
+                    c.execute(
+                        "UPDATE admins SET is_super=1 WHERE user_id=? AND is_super=0",
+                        (uid,))
+            except Exception:
+                pass
+        return added
+
+    if conn is not None:
+        return _run(conn)
+    with get_db() as c:
+        return _run(c)
+
 
 def init_db():
     with get_db() as db:
@@ -94,7 +211,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS admins (
             user_id INTEGER PRIMARY KEY, is_super INTEGER DEFAULT 0,
             permissions TEXT DEFAULT 'all', added_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            expires_at TEXT DEFAULT NULL, notify_prefs TEXT DEFAULT 'all');
+            expires_at TEXT DEFAULT NULL, notify_prefs TEXT DEFAULT 'all',
+            panel_username TEXT DEFAULT NULL, panel_password_hash TEXT DEFAULT NULL,
+            totp_secret TEXT DEFAULT '', totp_pending_secret TEXT DEFAULT '',
+            totp_enabled INTEGER DEFAULT 0,
+            reset_code_hash TEXT DEFAULT '', reset_code_expires TEXT DEFAULT '');
         CREATE TABLE IF NOT EXISTS panel_sessions (
     sid TEXT PRIMARY KEY,
     user_id INTEGER,
@@ -142,6 +263,12 @@ CREATE TABLE IF NOT EXISTS admin_logs (
         _ensure_extra_tables(db)
         # migrate: add columns that may not exist in older DBs
         _migrate(db)
+        # Repair panel-auth columns that used to live only in migrate_db.py.
+        # Without this the panel returned HTTP 500 on every login and every
+        # password-reset request ("no such column: panel_username").
+        ensure_schema(db)
+        # Create the owner rows so password recovery can reach somebody.
+        seed_admins_from_env(db)
 
 def _migrate(db):
     cols = {
@@ -425,8 +552,13 @@ def stock_count(pid):
 # ──────────────── خرید اتمیک (چندتایی) ────────────────
 def purchase(uid, product, final_price, qty=1):
     """خرید چند محصول به‌صورت اتمیک. برمی‌گردونه لیست محتواها یا کد خطا."""
-    with get_db() as db:
+    # BEGIN IMMEDIATE: the balance check and the debit below must be one
+    # atomic transaction. Without it two purchases sent at the same moment
+    # can both pass the check and overdraw the account.
+    with get_db(immediate=True) as db:
         u = db.execute("SELECT balance FROM users WHERE user_id=?", (uid,)).fetchone()
+        if u is None:
+            return "NO_USER"
         total = round(final_price * qty, 2)
         if u["balance"] < total:
             return "NO_BALANCE"
@@ -936,7 +1068,9 @@ def add_zp_pending(authority, user_id, amount_rial, amount_usd):
 
 
 def pop_zp_pending(authority):
-    with get_db() as conn:
+    # immediate=True: two concurrent Zarinpal callbacks must not both read
+    # the row before either of them deletes it.
+    with get_db(immediate=True) as conn:
         _ensure_extra_tables(conn)
         row = conn.execute("SELECT * FROM zarinpal_pending WHERE authority=?", (authority,)).fetchone()
         if row:

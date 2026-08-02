@@ -106,6 +106,11 @@ def zarinpal_callback(Authority: str = "", Status: str = ""):
         return _html("خطا", "ارتباط با زرین‌پال برقرار نشد. چند لحظه بعد صفحه را رفرش کنید.", ok=False)
     code = (r.get("data") or {}).get("code")
     if code not in (100, 101):
+        # Put the pending record back. It was popped before verification,
+        # so without this a transient Zarinpal error loses the payment for
+        # good and the user can never retry.
+        db.add_zp_pending(Authority, pending["user_id"],
+                          pending["amount_rial"], pending["amount_usd"])
         return _html("پرداخت ناموفق", f"تایید پرداخت انجام نشد (کد {code}).", ok=False)
     ref_id = (r.get("data") or {}).get("ref_id", Authority)
     uid = pending["user_id"]

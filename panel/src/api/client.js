@@ -1,9 +1,15 @@
 import axios from 'axios'
 
+// 15s was far too short for backups, restores, CSV exports and mass
+// broadcasts: the browser gave up while the server kept working, the admin
+// saw an error and retried -- sending the same broadcast twice.
 const api = axios.create({
   baseURL: '/api',
-  timeout: 15000,
+  timeout: 60000,
 })
+
+// Pass as { timeout: LONG_TIMEOUT } for operations known to be slow.
+export const LONG_TIMEOUT = 300000
 
 // Attach JWT token to every request
 api.interceptors.request.use((config) => {

@@ -1,3 +1,6 @@
+# /etc/systemd/system/shopbot.service
+# Installed automatically by the setup wizard. Kept here for manual installs:
+#   sudo cp deploy/shopbot.service /etc/systemd/system/
 [Unit]
 Description=Telegram Shop Bot
 After=network-online.target
@@ -5,11 +8,23 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=shopbot
+Group=shopbot
 WorkingDirectory=/opt/shopbot
+EnvironmentFile=/opt/shopbot/.env
 ExecStart=/opt/shopbot/venv/bin/python main.py
 Restart=always
 RestartSec=5
-EnvironmentFile=/opt/shopbot/.env
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/shopbot
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=shopbot
 
 [Install]
 WantedBy=multi-user.target

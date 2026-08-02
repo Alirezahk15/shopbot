@@ -481,8 +481,9 @@ CARD_DETECT_METHODS = {
         "fields": [
             {"key": "sms_number", "label": "شماره SMS بانک", "label_en": "Bank SMS Number", "placeholder": "+989XXXXXXXXX"},
         ],
-        "note": "نیاز به SIM card و نرم‌افزار خواندن SMS دارد",
-        "note_en": "Requires SIM card and SMS reading software",
+        "note": "⚠️ هنوز پیاده‌سازی نشده — انتخاب این گزینه به تأیید دستی برمی‌گردد",
+        "note_en": "Not implemented yet - selecting this falls back to manual approval",
+        "unavailable": True,
     },
     "email": {
         "name": "ایمیل بانک",

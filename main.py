@@ -940,7 +940,10 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             percent = 0
         final = round(p["price"] * (100 - percent) / 100, 2)
         result = db.purchase(uid, p, final, qty)
-        if result == "NO_BALANCE":
+        if result == "NO_USER":
+            # user row disappeared mid-session; treat like an empty wallet
+            await edit(t("no_balance", lang), back_kb(lang, "browse"))
+        elif result == "NO_BALANCE":
             await edit(t("no_balance", lang), InlineKeyboardMarkup([
                 [btn(t("btn_recharge", lang), "recharge")],
                 [btn(t("btn_back", lang), f"prod:{pid}")]]))

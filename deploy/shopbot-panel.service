@@ -1,3 +1,8 @@
+# /etc/systemd/system/shopbot-panel.service
+#
+# IMPORTANT: --workers must stay at 1.
+# The login rate limiter keeps its attempt table in process memory, so a
+# second worker would give an attacker twice the allowed attempts.
 [Unit]
 Description=Shop Bot Admin Panel (FastAPI)
 After=network-online.target
@@ -5,11 +10,24 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=shopbot
+Group=shopbot
 WorkingDirectory=/opt/shopbot
-ExecStart=/opt/shopbot/venv/bin/python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+EnvironmentFile=/opt/shopbot/.env
+ExecStart=/opt/shopbot/venv/bin/python -m uvicorn api.main:app \
+    --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers
 Restart=always
 RestartSec=5
-EnvironmentFile=/opt/shopbot/.env
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/shopbot
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=shopbot-panel
 
 [Install]
 WantedBy=multi-user.target

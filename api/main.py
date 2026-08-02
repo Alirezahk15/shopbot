@@ -138,7 +138,7 @@ def _send_group_report(category, text, reply_markup=None):
 def _start_panel_session(claims, request, username):
     """Create a tracked panel session and report the new login to the sessions topic."""
     sid = _secrets.token_hex(16)
-    ip = request.client.host if request.client else "unknown"
+    ip = client_ip(request)
     agent = (request.headers.get("user-agent", "") or "")[:200]
     try:
         db.create_panel_session(sid, claims.get("uid") or 0, username or "", ip, agent)
@@ -161,6 +161,51 @@ def _start_panel_session(claims, request, username):
     return {**claims, "sid": sid}
 
 
+import time as _time
+
+# ── Real client IP ──
+# The panel sits behind nginx, so request.client.host is always 127.0.0.1.
+# Using it directly made the IP allowlist match nothing (127.0.0.1 is always
+# allowed) and put every visitor in a single rate-limit bucket, so five bad
+# logins from anyone locked out every admin.
+# Set PANEL_TRUST_PROXY=0 if the app is exposed directly without a proxy.
+_TRUST_PROXY = (os.environ.get("PANEL_TRUST_PROXY", "1") or "1").strip().lower() \
+    not in ("0", "false", "no")
+
+
+def client_ip(request: Request) -> str:
+    direct = request.client.host if request.client else ""
+    if not _TRUST_PROXY:
+        return direct or "unknown"
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        first = fwd.split(",")[0].strip()   # left-most entry is the client
+        if first:
+            return first
+    real = (request.headers.get("x-real-ip", "") or "").strip()
+    if real:
+        return real
+    return direct or "unknown"
+
+
+_allowlist_cache = {"value": "", "ts": 0.0}
+_ALLOWLIST_TTL = 30
+
+
+def _get_ip_allowlist() -> str:
+    """Cached. This setting used to be read from SQLite on every request."""
+    now = _time.time()
+    if now - _allowlist_cache["ts"] < _ALLOWLIST_TTL:
+        return _allowlist_cache["value"]
+    try:
+        val = (db.get_setting("panel_ip_allowlist", "") or "").strip()
+    except Exception:
+        val = _allowlist_cache["value"]
+    _allowlist_cache["value"] = val
+    _allowlist_cache["ts"] = now
+    return val
+
+
 class LoginRequest(BaseModel):
     username: Optional[str] = None
     password: str
@@ -168,7 +213,7 @@ class LoginRequest(BaseModel):
 
 @app.post("/api/auth/login")
 def login(body: LoginRequest, request: Request):
-    ip = request.client.host if request.client else "unknown"
+    ip = client_ip(request)
     rate_key = f"login:{ip}"
     if not auth_module.check_rate_limit(rate_key):
         raise HTTPException(status_code=429, detail="Too many attempts. Try again in a few minutes.")
@@ -190,7 +235,9 @@ def login(body: LoginRequest, request: Request):
         return {"token": token, "admin": auth_module.public_admin_info(claims, row["totp_enabled"])}
 
     # Legacy fallback: PANEL_PASSWORD works only while no admin has credentials yet
-    if auth_module.credentialed_admin_count() == 0 and body.password == auth_module.PANEL_PASSWORD:
+    if (auth_module.PANEL_PASSWORD
+            and auth_module.credentialed_admin_count() == 0
+            and _secrets.compare_digest(body.password, auth_module.PANEL_PASSWORD)):
         uid = _ADMIN_IDS[0] if _ADMIN_IDS else 0
         claims = {"sub": username or "admin", "uid": uid, "is_super": True, "perms": "all", "purpose": "full"}
         auth_module.clear_attempts(rate_key)
@@ -328,7 +375,7 @@ _GENERIC_FORGOT = {
 
 @app.post("/api/auth/forgot")
 def forgot_password(body: ForgotRequest, request: Request):
-    ip = request.client.host if request.client else "unknown"
+    ip = client_ip(request)
     if not auth_module.check_rate_limit(f"forgot:{ip}", max_attempts=5, window=600):
         raise HTTPException(status_code=429, detail="Too many attempts. Try again in a few minutes.")
     auth_module.record_attempt(f"forgot:{ip}")
@@ -365,7 +412,7 @@ class ResetPasswordRequest(BaseModel):
 
 @app.post("/api/auth/reset-password")
 def reset_password(body: ResetPasswordRequest, request: Request):
-    ip = request.client.host if request.client else "unknown"
+    ip = client_ip(request)
     rate_key = f"reset:{ip}"
     if not auth_module.check_rate_limit(rate_key, max_attempts=6, window=600):
         raise HTTPException(status_code=429, detail="Too many attempts. Try again in a few minutes.")
@@ -412,12 +459,9 @@ async def permission_guard(request: Request, call_next):
     path = request.url.path
     # ── IP allowlist (empty = allow all; localhost is always allowed) ──
     if path.startswith("/api/") and not path.startswith("/api/pay/"):
-        try:
-            _allow = (db.get_setting("panel_ip_allowlist", "") or "").strip()
-        except Exception:
-            _allow = ""
+        _allow = _get_ip_allowlist()
         if _allow:
-            _client_ip = request.client.host if request.client else ""
+            _client_ip = client_ip(request)
             _allowed = {p.strip() for p in _allow.split(",") if p.strip()}
             if _client_ip not in _allowed and _client_ip not in ("127.0.0.1", "::1", "localhost"):
                 return JSONResponse({"detail": "Access from this IP is not allowed"}, status_code=403)
@@ -551,12 +595,17 @@ if os.path.exists(panel_dist):
 
     @app.get("/{full_path:path}")
     def serve_react(full_path: str):
+        # Never swallow unknown API routes: answering with index.html and
+        # HTTP 200 makes the frontend try to JSON.parse an HTML document.
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
         index = os.path.join(panel_dist, "index.html")
         return FileResponse(index)
 
 
 # ── Startup ──
-@app.on_event("startup")
+# @app.on_event is deprecated in current FastAPI releases; this handler is
+# registered explicitly at the bottom of this module instead.
 def startup():
     db.init_db()
     # Enable WAL mode for better concurrent access
@@ -564,3 +613,6 @@ def startup():
         conn.execute("PRAGMA journal_mode=WAL")
     print("✅ Admin Panel API started")
     print(f"📖 Docs: http://localhost:{os.environ.get('PANEL_PORT', 8000)}/docs")
+
+
+app.add_event_handler("startup", startup)

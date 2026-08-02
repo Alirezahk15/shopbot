@@ -1,351 +1,471 @@
-#!/bin/bash
-# =============================================================================
-#  ShopBot - Installer (English only)
+#!/usr/bin/env bash
+# ============================================================================
+#  ShopBot - Telegram Shop Bot + Admin Panel
+#  Interactive installer & manager for Debian / Ubuntu servers
 #
-#  Method 1 - Direct install (only when the repo is PUBLIC):
-#    curl -fsSL -o /tmp/install.sh https://raw.githubusercontent.com/Alirezahk15/shopbot/main/install.sh
-#    sudo bash /tmp/install.sh
-#
-#  Method 2 - Private repo with a Personal Access Token:
-#    export GITHUB_TOKEN=ghp_xxxxxxxxxxxx
-#    curl -fsSL -o /tmp/install.sh -H "Authorization: Bearer $GITHUB_TOKEN" \
-#      https://raw.githubusercontent.com/Alirezahk15/shopbot/main/install.sh
-#    sudo -E bash /tmp/install.sh
-#
-#  Method 3 - Offline, from an already downloaded source tree:
-#    sudo bash install.sh
-# =============================================================================
-
+#  Usage:
+#      bash <(curl -fsSL https://raw.githubusercontent.com/Alirezahk15/shopbot/main/install.sh)
+#  After installation simply run:
+#      shopbot
+# ============================================================================
 set -uo pipefail
 
-RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; CYAN=$'\033[0;36m'
-YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; NC=$'\033[0m'
-
-REPO="Alirezahk15/shopbot"
+# ---------------------------------------------------------------- constants
+REPO="${REPO:-Alirezahk15/shopbot}"
 BRANCH="${BRANCH:-main}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/shopbot}"
+SERVICE_BOT="shopbot"
+SERVICE_PANEL="shopbot-panel"
+RUN_USER="shopbot"
+WIZARD_PORT="${WIZARD_PORT:-8080}"
 TMP_DIR="/tmp/shopbot-src"
-PORT="${WIZARD_PORT:-8080}"
-GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 LOG_FILE="/var/log/shopbot-install.log"
+STATE_FILE="/var/lib/shopbot-install-state.json"
+BACKUP_DIR="$INSTALL_DIR/backups"
+LAUNCHER="/usr/local/bin/shopbot"
+SELF_URL="https://raw.githubusercontent.com/$REPO/$BRANCH/install.sh"
 
-# ---------------------------------------------------------------------------
-# Output helpers
-# ---------------------------------------------------------------------------
-log()   { printf '%s\n' "$*" >>"$LOG_FILE" 2>/dev/null || true; }
-info()  { echo "${CYAN}  [*]${NC} $*"; log "[info] $*"; }
-ok()    { echo "${GREEN}  [OK]${NC} $*"; log "[ok] $*"; }
-warn()  { echo "${YELLOW}  [!]${NC} $*"; log "[warn] $*"; }
-step()  { echo; echo "${BLUE}${BOLD}  >> $*${NC}"; log "[step] $*"; }
+# ------------------------------------------------------------------ colours
+if [[ -t 1 ]]; then
+  R=$'\e[0m'; B=$'\e[1m'; DIM=$'\e[2m'
+  RED=$'\e[38;5;203m'; GRN=$'\e[38;5;114m'; YLW=$'\e[38;5;221m'
+  BLU=$'\e[38;5;111m'; PUR=$'\e[38;5;141m'; CYN=$'\e[38;5;116m'; GRY=$'\e[38;5;245m'
+else
+  R=""; B=""; DIM=""; RED=""; GRN=""; YLW=""; BLU=""; PUR=""; CYN=""; GRY=""
+fi
 
-# fail "<title>" "<technical detail>" "<solution line 1>" "<solution line 2>" ...
-fail() {
-    local title="$1"; shift
-    local detail="${1:-}"; shift || true
-    echo
-    echo "${RED}${BOLD}  ============================================================${NC}"
-    echo "${RED}${BOLD}  [X] FAILED: ${title}${NC}"
-    echo "${RED}${BOLD}  ============================================================${NC}"
-    if [ -n "$detail" ]; then
-        echo "${DIM}  Technical detail:${NC}"
-        echo "${DIM}    ${detail}${NC}"
-    fi
-    if [ "$#" -gt 0 ]; then
-        echo
-        echo "${YELLOW}${BOLD}  HOW TO FIX THIS:${NC}"
-        local i=1
-        for line in "$@"; do
-            if [ -n "$line" ]; then
-                echo "${YELLOW}    ${i}) ${line}${NC}"
-                i=$((i + 1))
-            fi
-        done
-    fi
-    echo
-    echo "${DIM}  Full log: ${LOG_FILE}${NC}"
-    echo "${DIM}  After fixing, just run the installer again - it resumes safely.${NC}"
-    echo
-    exit 1
+log()  { printf '%s\n' "$(date '+%F %T') $*" >>"$LOG_FILE" 2>/dev/null || true; }
+say()  { printf '%s\n' "$*"; log "$*"; }
+info() { say "  ${BLU}i${R}  $*"; }
+ok()   { say "  ${GRN}OK${R} $*"; }
+warn() { say "  ${YLW}!${R}  $*"; }
+err()  { say "  ${RED}x${R}  $*"; }
+step() { say ""; say "${PUR}${B}>> $*${R}"; }
+
+die() {
+  err "$1"
+  [[ $# -gt 1 ]] && { say ""; say "  ${YLW}How to fix:${R}"; shift; for l in "$@"; do say "    - $l"; done; }
+  say ""
+  say "  ${GRY}Full log: $LOG_FILE${R}"
+  exit 1
 }
 
-# ---------------------------------------------------------------------------
-# Root check
-# ---------------------------------------------------------------------------
-if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    fail "Root privileges required" "Current user id is $(id -u), expected 0." \
-        "Run the installer with sudo:  sudo bash install.sh" \
-        "Or switch to root first:  sudo -i"
-fi
+pause() { say ""; read -rp "  ${GRY}Press Enter to continue...${R} " _ || true; }
 
-mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-: >"$LOG_FILE" 2>/dev/null || LOG_FILE=/tmp/shopbot-install.log
+# ------------------------------------------------------------------- checks
+require_root() {
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || die "This script must run as root." \
+    "Run it again with: sudo bash $0"
+}
 
-# ---------------------------------------------------------------------------
-# Banner
-# ---------------------------------------------------------------------------
-clear 2>/dev/null || true
-echo "${GREEN}${BOLD}"
-echo "  ============================================================"
-echo "  |                                                          |"
-echo "  |             S H O P B O T   -   I N S T A L L E R        |"
-echo "  |                                                          |"
-echo "  ============================================================"
-echo "${NC}"
+require_debian() {
+  command -v apt-get >/dev/null 2>&1 || die \
+    "Unsupported distribution (apt-get not found)." \
+    "ShopBot supports Debian 11+ and Ubuntu 20.04+."
+}
 
-# ---------------------------------------------------------------------------
-# OS check
-# ---------------------------------------------------------------------------
-if ! command -v apt-get >/dev/null 2>&1; then
-    OS_NAME="unknown"
-    [ -r /etc/os-release ] && OS_NAME="$(. /etc/os-release && echo "${PRETTY_NAME:-unknown}")"
-    fail "Unsupported operating system" "apt-get not found. Detected: ${OS_NAME}" \
-        "ShopBot supports Debian 11/12 and Ubuntu 20.04/22.04/24.04 only." \
-        "Reinstall your server with Ubuntu 22.04 LTS and try again."
-fi
+is_installed() { [[ -d "$INSTALL_DIR" && -f "$INSTALL_DIR/.env" ]]; }
 
-# ---------------------------------------------------------------------------
-# Wait for the apt/dpkg lock instead of dying on it
-# ---------------------------------------------------------------------------
+svc_state() {
+  local s="$1"
+  if ! systemctl list-unit-files 2>/dev/null | grep -q "^${s}.service"; then
+    printf '%s' "${GRY}not installed${R}"
+  elif systemctl is-active --quiet "$s"; then
+    printf '%s' "${GRN}running${R}"
+  else
+    printf '%s' "${RED}stopped${R}"
+  fi
+}
+
+# --------------------------------------------------------------- apt helper
 wait_for_apt() {
-    local max="${1:-300}" waited=0 holder=""
-    local locks="/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock"
-
-    while :; do
-        local busy=0
-        for f in $locks; do
-            if [ -e "$f" ] && fuser "$f" >/dev/null 2>&1; then busy=1; break; fi
-        done
-        pgrep -x unattended-upgr >/dev/null 2>&1 && busy=1
-        [ "$busy" -eq 0 ] && return 0
-
-        if [ "$waited" -eq 0 ]; then
-            holder="$(fuser -v /var/lib/dpkg/lock-frontend 2>&1 | tail -n 1 | awk '{print $NF}')"
-            warn "Another package manager is running (likely unattended-upgrades). Waiting..."
-        fi
-        if [ "$waited" -ge "$max" ]; then
-            return 1
-        fi
-        printf '\r%s' "${DIM}      waiting for apt lock... ${waited}s / ${max}s${NC}"
-        sleep 5
-        waited=$((waited + 5))
-    done
+  local waited=0 max=420
+  while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock \
+        /var/cache/apt/archives/lock >/dev/null 2>&1; do
+    (( waited == 0 )) && info "Waiting for another package manager to finish..."
+    sleep 5; waited=$((waited + 5))
+    if (( waited >= max )); then
+      die "Another process has held the apt lock for ${max}s." \
+        "Wait for unattended-upgrades to finish, then retry." \
+        "Or inspect it with: sudo lsof /var/lib/dpkg/lock-frontend"
+    fi
+  done
 }
 
-apt_lock_help() {
-    fail "Could not acquire the apt/dpkg lock" \
-        "/var/lib/dpkg/lock-frontend is held by another process." \
-        "See who holds it:  ps -eo pid,etime,cmd | grep -E 'apt|dpkg' | grep -v grep" \
-        "If it is unattended-upgrades, stop it:  sudo systemctl stop unattended-upgrades" \
-        "Kill the stuck process:  sudo kill <PID>   (then  sudo kill -9 <PID>  if needed)" \
-        "Repair dpkg afterwards:  sudo dpkg --configure -a && sudo apt-get update" \
-        "As a last resort (ONLY if no apt process is alive): sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock"
+apt_install() {
+  wait_for_apt
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >>"$LOG_FILE" 2>&1
 }
 
-# ---------------------------------------------------------------------------
-# Prerequisites: git + python3 + curl
-# ---------------------------------------------------------------------------
-step "Step 1/4  Checking prerequisites"
+# ------------------------------------------------------------------ banner
+banner() {
+  clear 2>/dev/null || true
+  cat <<EOF
+${PUR}${B}
+   ____  _                 ____        _
+  / ___|| |__   ___  _ __ | __ )  ___ | |_
+  \\___ \\| '_ \\ / _ \\| '_ \\|  _ \\ / _ \\| __|
+   ___) | | | | (_) | |_) | |_) | (_) | |_
+  |____/|_| |_|\\___/| .__/|____/ \\___/ \\__|
+                    |_|
+${R}${GRY}  Telegram Shop Bot + Admin Panel${R}
+${GRY}  ------------------------------------------------${R}
+EOF
+}
 
-MISSING=""
-for bin in python3 git curl; do
-    command -v "$bin" >/dev/null 2>&1 || MISSING="$MISSING $bin"
-done
+status_line() {
+  if is_installed; then
+    local ver="unknown"
+    [[ -f "$INSTALL_DIR/VERSION" ]] && ver=$(<"$INSTALL_DIR/VERSION")
+    local domain=""
+    domain=$(grep -sE '^PANEL_DOMAIN=' "$INSTALL_DIR/.env" | cut -d= -f2- | tr -d '"' || true)
+    say "  Status : ${GRN}installed${R}  ${GRY}(v${ver})${R}"
+    say "  Bot    : $(svc_state $SERVICE_BOT)     Panel: $(svc_state $SERVICE_PANEL)"
+    [[ -n "$domain" ]] && say "  Panel  : ${CYN}https://${domain}${R}"
+  else
+    say "  Status : ${YLW}not installed${R}"
+  fi
+  say "${GRY}  ------------------------------------------------${R}"
+}
 
-if [ -n "$MISSING" ]; then
-    info "Installing missing packages:${MISSING}"
-    wait_for_apt 300 || apt_lock_help
-    echo
-    if ! apt-get update -qq >>"$LOG_FILE" 2>&1; then
-        warn "apt-get update reported problems, continuing anyway."
+# ============================================================ 1. INSTALL
+do_install() {
+  if is_installed; then
+    warn "ShopBot is already installed at $INSTALL_DIR"
+    read -rp "  Re-run the setup wizard anyway? [y/N] " a
+    [[ "${a,,}" == "y" ]] || return 0
+  fi
+
+  step "Installing system packages"
+  wait_for_apt
+  DEBIAN_FRONTEND=noninteractive apt-get update -qq >>"$LOG_FILE" 2>&1
+  apt_install python3 python3-pip python3-venv git curl wget rsync \
+              nginx sqlite3 openssl ufw certbot python3-certbot-nginx \
+              build-essential libssl-dev dnsutils psmisc \
+    || die "Package installation failed." \
+           "Check your network / apt sources, then retry." \
+           "Details: tail -50 $LOG_FILE"
+  ok "System packages ready"
+
+  step "Installing Node.js 20 (for the admin panel build)"
+  local need_node=1
+  if command -v node >/dev/null 2>&1; then
+    local major
+    major=$(node -v | sed 's/v\([0-9]*\).*/\1/')
+    [[ "$major" -ge 18 ]] && need_node=0
+  fi
+  if [[ $need_node -eq 1 ]]; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >>"$LOG_FILE" 2>&1 \
+      || die "Could not add the NodeSource repository." "Check outbound HTTPS access."
+    apt_install nodejs || die "Node.js installation failed."
+  fi
+  ok "Node.js $(node -v 2>/dev/null) ready"
+
+  step "Downloading ShopBot source"
+  rm -rf "$TMP_DIR"
+  local url="https://github.com/$REPO.git"
+  [[ -n "${GITHUB_TOKEN:-}" ]] && url="https://x-access-token:${GITHUB_TOKEN}@github.com/$REPO.git"
+  git clone --depth 1 -b "$BRANCH" "$url" "$TMP_DIR" >>"$LOG_FILE" 2>&1 \
+    || die "Could not download the source code." \
+           "Verify the repository name and branch: $REPO ($BRANCH)" \
+           "If the repo is private, export GITHUB_TOKEN=... first."
+  ok "Source downloaded"
+
+  step "Checking port $WIZARD_PORT"
+  if ss -ltn 2>/dev/null | grep -q ":$WIZARD_PORT "; then
+    die "Port $WIZARD_PORT is already in use." \
+        "Free it, or run: WIZARD_PORT=8090 bash $0"
+  fi
+  command -v ufw >/dev/null 2>&1 && ufw allow "$WIZARD_PORT/tcp" >>"$LOG_FILE" 2>&1
+  ok "Port $WIZARD_PORT is free"
+
+  local ip
+  ip=$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+
+  say ""
+  say "${GRN}${B}  Setup wizard is starting.${R}"
+  say ""
+  say "  Open this address in your browser:"
+  say "      ${CYN}${B}http://${ip}:${WIZARD_PORT}${R}"
+  say ""
+  say "  ${GRY}Keep this terminal open until the wizard finishes.${R}"
+  say ""
+
+  export SHOPBOT_WIZARD_PORT="$WIZARD_PORT"
+  export SHOPBOT_INSTALL_LOG="$LOG_FILE"
+  install_launcher
+  exec python3 "$TMP_DIR/setup/wizard.py"
+}
+
+# ============================================================ 2. UPDATE
+do_update() {
+  is_installed || { err "ShopBot is not installed yet. Choose option 1 first."; return 1; }
+
+  step "Backing up the database"
+  mkdir -p "$BACKUP_DIR"
+  local stamp backup
+  stamp=$(date +%Y%m%d_%H%M%S)
+  backup="$BACKUP_DIR/pre_update_$stamp.db"
+  if [[ -f "$INSTALL_DIR/shop.db" ]]; then
+    sqlite3 "$INSTALL_DIR/shop.db" ".backup '$backup'" 2>>"$LOG_FILE" \
+      || cp "$INSTALL_DIR/shop.db" "$backup"
+    ok "Backup saved to $backup"
+  else
+    warn "No database found yet - skipping backup"
+  fi
+
+  step "Fetching the latest version"
+  rm -rf "$TMP_DIR"
+  local url="https://github.com/$REPO.git"
+  [[ -n "${GITHUB_TOKEN:-}" ]] && url="https://x-access-token:${GITHUB_TOKEN}@github.com/$REPO.git"
+  git clone --depth 1 -b "$BRANCH" "$url" "$TMP_DIR" >>"$LOG_FILE" 2>&1 \
+    || { err "Download failed - your installation was NOT modified."; return 1; }
+  ok "Latest version downloaded"
+
+  step "Updating application files"
+  rsync -a --delete \
+    --exclude '.env' --exclude '*.db' --exclude '*.db-wal' --exclude '*.db-shm' \
+    --exclude 'backups/' --exclude 'venv/' --exclude 'uploads/' \
+    --exclude '__pycache__/' --exclude '.git/' --exclude 'node_modules/' \
+    "$TMP_DIR/" "$INSTALL_DIR/" >>"$LOG_FILE" 2>&1 \
+    || { err "Copying files failed. Restore from $backup if needed."; return 1; }
+  ok "Files updated"
+
+  step "Updating Python dependencies"
+  if [[ -f "$INSTALL_DIR/requirements.txt" ]]; then
+    "$INSTALL_DIR/venv/bin/pip" install -q --upgrade -r "$INSTALL_DIR/requirements.txt" >>"$LOG_FILE" 2>&1 \
+      || { err "pip install failed. See $LOG_FILE"; return 1; }
+    ok "Python dependencies up to date"
+  else
+    warn "requirements.txt not found - skipped"
+  fi
+
+  step "Applying database migrations"
+  ( cd "$INSTALL_DIR" && "$INSTALL_DIR/venv/bin/python" migrate_db.py >>"$LOG_FILE" 2>&1 ) \
+    && ok "Database schema is current" \
+    || warn "Migration script reported an issue - see $LOG_FILE"
+
+  step "Rebuilding the admin panel"
+  if [[ -d "$INSTALL_DIR/panel" ]]; then
+    ( cd "$INSTALL_DIR/panel" && npm ci --no-audit --no-fund >>"$LOG_FILE" 2>&1 \
+      && npm run build >>"$LOG_FILE" 2>&1 ) \
+      && ok "Panel rebuilt" \
+      || { err "Panel build failed. See $LOG_FILE"; return 1; }
+  fi
+
+  chown -R "$RUN_USER:$RUN_USER" "$INSTALL_DIR" 2>/dev/null || true
+
+  step "Restarting services"
+  systemctl daemon-reload
+  systemctl restart "$SERVICE_BOT" "$SERVICE_PANEL"
+  sleep 2
+  ok "Bot: $(svc_state $SERVICE_BOT)   Panel: $(svc_state $SERVICE_PANEL)"
+
+  install_launcher
+  say ""
+  ok "${GRN}${B}Update completed successfully.${R}"
+}
+
+# ============================================================ 3. UNINSTALL
+do_uninstall() {
+  say ""
+  warn "${B}This will remove ShopBot, its services and its nginx site.${R}"
+  read -rp "  Type ${B}REMOVE${R} to confirm: " confirm
+  [[ "$confirm" == "REMOVE" ]] || { info "Cancelled."; return 0; }
+
+  local keep="n"
+  if [[ -f "$INSTALL_DIR/shop.db" ]]; then
+    read -rp "  Keep a copy of the database in /root ? [Y/n] " keep
+    if [[ "${keep,,}" != "n" ]]; then
+      local out="/root/shopbot-final-$(date +%Y%m%d_%H%M%S).db"
+      cp "$INSTALL_DIR/shop.db" "$out" 2>/dev/null && ok "Database saved to $out"
     fi
-    wait_for_apt 300 || apt_lock_help
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $MISSING >>"$LOG_FILE" 2>&1; then
-        DETAIL="$(tail -n 3 "$LOG_FILE" 2>/dev/null | tr '\n' ' ')"
-        case "$DETAIL" in
-            *lock*|*Unable\ to\ acquire*) apt_lock_help ;;
-        esac
-        fail "Installing prerequisites (${MISSING# })" "$DETAIL" \
-            "Check internet access:  ping -c 3 deb.debian.org" \
-            "Refresh package lists:  sudo apt-get update --fix-missing" \
-            "Fix broken packages:    sudo apt-get -f install" \
-            "Then run the installer again."
-    fi
-    ok "Prerequisites installed"
-else
-    ok "python3, git and curl are already present"
-fi
+  fi
 
-PY_VER="$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo 0.0)"
-PY_MAJOR="${PY_VER%%.*}"; PY_MINOR="${PY_VER##*.}"
-if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 8 ]; }; then
-    fail "Python version too old" "Found Python ${PY_VER}, need 3.8 or newer." \
-        "Install a newer Python:  sudo apt-get install -y python3.11 python3.11-venv" \
-        "Or use Ubuntu 22.04 / 24.04 which ship a supported Python."
-fi
-ok "Python ${PY_VER} detected"
+  step "Stopping services"
+  systemctl stop "$SERVICE_BOT" "$SERVICE_PANEL" 2>/dev/null || true
+  systemctl disable "$SERVICE_BOT" "$SERVICE_PANEL" 2>/dev/null || true
+  rm -f "/etc/systemd/system/${SERVICE_BOT}.service" \
+        "/etc/systemd/system/${SERVICE_PANEL}.service"
+  systemctl daemon-reload 2>/dev/null || true
+  ok "Services removed"
 
-# ---------------------------------------------------------------------------
-# Locate wizard.py (local source tree, otherwise clone)
-# ---------------------------------------------------------------------------
-step "Step 2/4  Locating ShopBot source"
+  step "Removing the nginx site"
+  rm -f /etc/nginx/sites-enabled/shopbot /etc/nginx/sites-available/shopbot
+  if nginx -t >/dev/null 2>&1; then
+    systemctl reload nginx >/dev/null 2>&1 || true
+    ok "nginx reloaded"
+  else
+    warn "nginx config test failed - please review it manually"
+  fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
-WIZARD=""
+  step "Removing files"
+  rm -rf "$INSTALL_DIR" "$TMP_DIR" "$STATE_FILE" "$LAUNCHER"
+  ok "Files removed"
 
-if [ -n "$SCRIPT_DIR" ] && [ -f "${SCRIPT_DIR}/setup/wizard.py" ]; then
-    WIZARD="${SCRIPT_DIR}/setup/wizard.py"
-    ok "Local source tree found: ${SCRIPT_DIR}"
-else
-    info "No local source next to the script - downloading from GitHub"
+  step "Removing the service account"
+  if id "$RUN_USER" >/dev/null 2>&1; then
+    userdel -r "$RUN_USER" >/dev/null 2>&1 || userdel "$RUN_USER" >/dev/null 2>&1 || true
+    ok "User '$RUN_USER' removed"
+  fi
 
-    if [ -n "$GITHUB_TOKEN" ]; then
-        CLONE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-        info "Using GITHUB_TOKEN for a private repository"
-    else
-        CLONE_URL="https://github.com/${REPO}.git"
-    fi
+  command -v ufw >/dev/null 2>&1 && ufw delete allow "$WIZARD_PORT/tcp" >/dev/null 2>&1
 
-    rm -rf "$TMP_DIR"
-    if ! git clone --depth=1 --branch "$BRANCH" "$CLONE_URL" "$TMP_DIR" >>"$LOG_FILE" 2>&1; then
-        DETAIL="$(grep -iE 'fatal|error' "$LOG_FILE" | tail -n 1 | sed "s#${GITHUB_TOKEN:-__none__}#***#g")"
-        if [ -z "$GITHUB_TOKEN" ]; then
-            fail "Could not download ShopBot from GitHub" "$DETAIL" \
-                "Most likely cause: the repository is PRIVATE (curl shows 404, git shows 'Authentication failed')." \
-                "Make it public temporarily: GitHub > Settings > Danger Zone > Change visibility > Public" \
-                "Or use a token: export GITHUB_TOKEN=ghp_xxx  then  sudo -E bash install.sh" \
-                "Or copy the source to the server manually and run:  sudo bash install.sh" \
-                "Check the branch name too - this installer uses branch '${BRANCH}'."
-        else
-            fail "GitHub authentication failed" "$DETAIL" \
-                "Your GITHUB_TOKEN is invalid, expired, or lacks the 'repo' scope." \
-                "Create a new one: GitHub > Settings > Developer settings > Personal access tokens" \
-                "Make sure you exported it AND used sudo -E:  sudo -E bash install.sh" \
-                "Verify the branch '${BRANCH}' exists in ${REPO}."
-        fi
-    fi
-    WIZARD="${TMP_DIR}/setup/wizard.py"
-    ok "Source downloaded to ${TMP_DIR}"
-fi
+  say ""
+  ok "${GRN}${B}ShopBot has been completely removed.${R}"
+}
 
-if [ ! -f "$WIZARD" ]; then
-    fail "setup/wizard.py not found" "Expected at: ${WIZARD}" \
-        "The downloaded/copied source tree is incomplete." \
-        "Delete the cache and retry:  sudo rm -rf ${TMP_DIR}" \
-        "If installing offline, run install.sh from the project root folder."
-fi
+# ============================================================ 4. SERVICES
+do_restart() {
+  is_installed || { err "ShopBot is not installed."; return 1; }
+  step "Restarting services"
+  systemctl restart "$SERVICE_BOT" "$SERVICE_PANEL"
+  sleep 2
+  ok "Bot: $(svc_state $SERVICE_BOT)   Panel: $(svc_state $SERVICE_PANEL)"
+}
 
-if ! python3 -c "import ast,sys;ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$WIZARD" >>"$LOG_FILE" 2>&1; then
-    fail "setup/wizard.py is corrupted" "$(tail -n 2 "$LOG_FILE" | tr '\n' ' ')" \
-        "The file was damaged in transfer (often Windows CRLF line endings)." \
-        "Fix it:  sudo sed -i 's/\\r$//' ${WIZARD}" \
-        "Or re-download a clean copy:  sudo rm -rf ${TMP_DIR}  and run the installer again."
-fi
-ok "Wizard script verified"
+do_stop() {
+  is_installed || { err "ShopBot is not installed."; return 1; }
+  systemctl stop "$SERVICE_BOT" "$SERVICE_PANEL"
+  ok "Services stopped"
+}
 
-# ---------------------------------------------------------------------------
-# Port availability
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Build the React setup wizard (same stack as the admin panel).
-# This is best-effort: if Node.js or the build fails for any reason, the
-# wizard still starts using its built-in HTML interface.
-# ---------------------------------------------------------------------------
-step "Step 3/4  Building the wizard interface"
+do_start() {
+  is_installed || { err "ShopBot is not installed."; return 1; }
+  systemctl start "$SERVICE_BOT" "$SERVICE_PANEL"
+  sleep 2
+  ok "Bot: $(svc_state $SERVICE_BOT)   Panel: $(svc_state $SERVICE_PANEL)"
+}
 
-SRC_ROOT="$(cd "$(dirname "$WIZARD")/.." 2>/dev/null && pwd)" || SRC_ROOT=""
-UI_DIR="${SRC_ROOT}/setup/ui"
-UI_BUILT=0
+do_status() {
+  is_installed || { err "ShopBot is not installed."; return 1; }
+  step "Service status"
+  systemctl --no-pager --lines=0 status "$SERVICE_BOT" 2>&1 | head -8
+  say ""
+  systemctl --no-pager --lines=0 status "$SERVICE_PANEL" 2>&1 | head -8
+}
 
-if [ -f "${UI_DIR}/dist/index.html" ]; then
-    UI_BUILT=1
-    ok "Wizard interface already built - skipping"
-elif [ ! -f "${UI_DIR}/package.json" ]; then
-    warn "Wizard UI source not found - using the built-in interface"
-else
-    NODE_MAJOR=0
-    if command -v node >/dev/null 2>&1; then
-        NODE_MAJOR="$(node -v 2>/dev/null | sed "s/^v//" | cut -d. -f1)"
-        case "$NODE_MAJOR" in (*[!0-9]*|"") NODE_MAJOR=0 ;; esac
-    fi
+do_logs() {
+  say ""
+  say "  1) Bot logs        2) Panel logs        3) Installer log"
+  read -rp "  Choose [1-3]: " c
+  case "$c" in
+    1) journalctl -u "$SERVICE_BOT" -n 100 --no-pager ;;
+    2) journalctl -u "$SERVICE_PANEL" -n 100 --no-pager ;;
+    3) tail -n 100 "$LOG_FILE" ;;
+    *) warn "Invalid choice" ;;
+  esac
+}
 
-    if [ "$NODE_MAJOR" -lt 18 ]; then
-        info "Installing Node.js 20 (needed to build the wizard interface)"
-        wait_for_apt || true
-        if curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesource.sh >>"$LOG_FILE" 2>&1 \
-            && bash /tmp/nodesource.sh >>"$LOG_FILE" 2>&1 \
-            && wait_for_apt \
-            && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs >>"$LOG_FILE" 2>&1; then
-            NODE_MAJOR="$(node -v 2>/dev/null | sed "s/^v//" | cut -d. -f1)"
-            case "$NODE_MAJOR" in (*[!0-9]*|"") NODE_MAJOR=0 ;; esac
-            ok "Node.js $(node -v 2>/dev/null) installed"
-        else
-            warn "Could not install Node.js now - the wizard will use its built-in interface"
-            warn "The installer will install Node.js again later for the admin panel"
-        fi
-    else
-        ok "Node.js $(node -v 2>/dev/null) detected"
-    fi
+# ============================================================ 5. BACKUP
+do_backup() {
+  is_installed || { err "ShopBot is not installed."; return 1; }
+  [[ -f "$INSTALL_DIR/shop.db" ]] || { err "No database found."; return 1; }
+  mkdir -p "$BACKUP_DIR"
+  local out="$BACKUP_DIR/manual_$(date +%Y%m%d_%H%M%S).db"
+  sqlite3 "$INSTALL_DIR/shop.db" ".backup '$out'" 2>>"$LOG_FILE" || cp "$INSTALL_DIR/shop.db" "$out"
+  ok "Backup created: $out"
+  say "  ${GRY}Copy it off the server with:${R}"
+  say "    scp root@$(hostname -I | awk '{print $1}'):$out ./"
+}
 
-    if [ "$NODE_MAJOR" -ge 18 ]; then
-        info "Building the wizard interface (about 1-2 minutes)..."
-        if ( cd "$UI_DIR" \
-             && npm install --no-audit --no-fund --loglevel=error >>"$LOG_FILE" 2>&1 \
-             && npm run build >>"$LOG_FILE" 2>&1 ); then
-            if [ -f "${UI_DIR}/dist/index.html" ]; then
-                UI_BUILT=1
-                ok "Wizard interface built successfully"
-            else
-                warn "Build finished but no output was produced - using the built-in interface"
-            fi
-        else
-            warn "Wizard interface build failed - using the built-in interface instead"
-            warn "Details are in ${LOG_FILE} (this does not stop the installation)"
-        fi
-    fi
-fi
+# ============================================================ 6. PASSWORD
+do_reset_password() {
+  is_installed || { err "ShopBot is not installed."; return 1; }
+  step "Reset admin panel password"
+  if [[ -f "$INSTALL_DIR/reset_panel_admin.py" ]]; then
+    ( cd "$INSTALL_DIR" && "$INSTALL_DIR/venv/bin/python" reset_panel_admin.py )
+  else
+    err "reset_panel_admin.py is missing from $INSTALL_DIR"
+    return 1
+  fi
+  systemctl restart "$SERVICE_PANEL" 2>/dev/null || true
+  ok "Panel restarted"
+}
 
-if [ "$UI_BUILT" -eq 1 ]; then
-    info "Interface: React (same design as the admin panel)"
-else
-    info "Interface: built-in HTML wizard (fully functional)"
-fi
+# ============================================================ 7. SSL
+do_ssl() {
+  is_installed || { err "ShopBot is not installed."; return 1; }
+  read -rp "  Domain name (e.g. bot.example.com): " domain
+  [[ -n "$domain" ]] || { err "Domain cannot be empty."; return 1; }
+  read -rp "  Email for Let's Encrypt notices: " email
+  step "Requesting a certificate for $domain"
+  certbot --nginx -d "$domain" --non-interactive --agree-tos \
+          -m "${email:-admin@$domain}" --redirect \
+    && ok "HTTPS is now active: https://$domain" \
+    || err "Certificate request failed. Make sure $domain points to this server."
+}
 
-step "Step 4/4  Starting the setup wizard"
+# ---------------------------------------------------------------- launcher
+install_launcher() {
+  local src="$INSTALL_DIR/install.sh"
+  [[ -f "$src" ]] || src="$TMP_DIR/install.sh"
+  if [[ -f "$src" ]]; then
+    cp "$src" "$LAUNCHER" 2>/dev/null && chmod +x "$LAUNCHER" 2>/dev/null && return 0
+  fi
+  cat >"$LAUNCHER" <<EOF
+#!/usr/bin/env bash
+bash <(curl -fsSL $SELF_URL) "\$@"
+EOF
+  chmod +x "$LAUNCHER"
+}
 
-if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":${PORT} "; then
-    HOLDER="$(ss -ltnp 2>/dev/null | grep ":${PORT} " | head -n 1 | sed 's/.*users:((//' | cut -d, -f1 | tr -d '\"')"
-    fail "Port ${PORT} is already in use" "Held by: ${HOLDER:-unknown}" \
-        "Find the process:  sudo ss -ltnp | grep :${PORT}" \
-        "Stop it, or run the installer on another port:  sudo WIZARD_PORT=8081 bash install.sh" \
-        "If a previous wizard is stuck:  sudo pkill -f setup/wizard.py"
-fi
+# -------------------------------------------------------------------- menu
+menu() {
+  while true; do
+    banner
+    status_line
+    say ""
+    say "   ${B}${GRN}1${R})  Install ShopBot            ${GRY}(guided web wizard)${R}"
+    say "   ${B}${BLU}2${R})  Update to the latest version"
+    say "   ${B}${RED}3${R})  Uninstall ShopBot"
+    say ""
+    say "   ${B}4${R})  Restart services            ${B}5${R})  Start services"
+    say "   ${B}6${R})  Stop services               ${B}7${R})  Service status"
+    say "   ${B}8${R})  View logs                   ${B}9${R})  Backup database"
+    say ""
+    say "   ${B}10${R}) Reset panel password        ${B}11${R}) Setup / renew SSL"
+    say ""
+    say "   ${B}0${R})  Exit"
+    say "${GRY}  ------------------------------------------------${R}"
+    read -rp "  ${B}Select an option [0-11]:${R} " choice
 
-SERVER_IP="$(python3 - <<'PY' 2>/dev/null || echo 127.0.0.1
-import socket
-try:
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.connect(("8.8.8.8", 80))
-    print(s.getsockname()[0])
-    s.close()
-except Exception:
-    print("127.0.0.1")
-PY
-)"
+    case "$choice" in
+      1)  do_install ;;
+      2)  do_update; pause ;;
+      3)  do_uninstall; pause ;;
+      4)  do_restart; pause ;;
+      5)  do_start; pause ;;
+      6)  do_stop; pause ;;
+      7)  do_status; pause ;;
+      8)  do_logs; pause ;;
+      9)  do_backup; pause ;;
+      10) do_reset_password; pause ;;
+      11) do_ssl; pause ;;
+      0)  say ""; say "  ${GRY}Bye.${R}"; exit 0 ;;
+      *)  warn "Invalid option: $choice"; sleep 1 ;;
+    esac
+  done
+}
 
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then
-    ufw allow "${PORT}/tcp" >/dev/null 2>&1 && info "Opened port ${PORT} in UFW for the wizard"
-fi
+# -------------------------------------------------------------------- main
+require_root
+require_debian
+mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+touch "$LOG_FILE" 2>/dev/null || true
 
-echo
-echo "${GREEN}${BOLD}  ------------------------------------------------------------${NC}"
-echo "${GREEN}${BOLD}   The setup wizard is ready. Open this URL in your browser:${NC}"
-echo
-echo "${BOLD}${CYAN}       http://${SERVER_IP}:${PORT}${NC}"
-echo
-echo "${DIM}   If the page does not load, open port ${PORT} in your provider's firewall.${NC}"
-echo "${DIM}   Press Ctrl + C here to stop the wizard.${NC}"
-echo "${GREEN}${BOLD}  ------------------------------------------------------------${NC}"
-echo
-
-export SHOPBOT_WIZARD_PORT="$PORT"
-export SHOPBOT_INSTALL_LOG="$LOG_FILE"
-exec python3 "$WIZARD"
+# Non-interactive shortcuts:  shopbot install | update | uninstall | restart ...
+case "${1:-}" in
+  install)   do_install; exit $? ;;
+  update)    do_update; exit $? ;;
+  uninstall) do_uninstall; exit $? ;;
+  restart)   do_restart; exit $? ;;
+  start)     do_start; exit $? ;;
+  stop)      do_stop; exit $? ;;
+  status)    do_status; exit $? ;;
+  backup)    do_backup; exit $? ;;
+  "")        menu ;;
+  *)         err "Unknown command: $1"
+             say "  Valid: install update uninstall restart start stop status backup"
+             exit 1 ;;
+esac
